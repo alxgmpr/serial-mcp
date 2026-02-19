@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "serial-mcp"
+version = "0.3.0"
+description = "MCP server for serial device communication"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+serial-mcp = "serial_mcp.server:main"
