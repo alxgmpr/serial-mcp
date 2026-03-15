@@ -81,10 +81,19 @@ class SerialSession:
 
     def _trim_history(self) -> None:
         """Remove oldest entries to stay under max_history_bytes. Lock must be held."""
-        while self._buffer_bytes > self._max_history_bytes and self._history:
-            _, old = self._history.pop(0)
-            self._buffer_bytes -= len(old)
-            self._read_cursor = max(0, self._read_cursor - 1)
+        if self._buffer_bytes <= self._max_history_bytes:
+            return
+        trim_count = 0
+        freed = 0
+        for _, chunk in self._history:
+            if self._buffer_bytes - freed <= self._max_history_bytes:
+                break
+            freed += len(chunk)
+            trim_count += 1
+        if trim_count > 0:
+            del self._history[:trim_count]
+            self._buffer_bytes -= freed
+            self._read_cursor = max(0, self._read_cursor - trim_count)
 
     # ── Read operations ──────────────────────────────────────────────
 

@@ -1,14 +1,27 @@
+import asyncio
+import atexit
 import time
+from typing import Literal
 
 import serial
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 from serial.tools import list_ports
 
 from serial_mcp.session import SerialSession
 
-mcp = FastMCP("serial-mcp")
+mcp = FastMCP("serial_mcp")
 
 _sessions: dict[str, SerialSession] = {}
+
+
+def _cleanup_sessions():
+    """Close all open sessions on server shutdown."""
+    for session in list(_sessions.values()):
+        session.close()
+    _sessions.clear()
+
+
+atexit.register(_cleanup_sessions)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -23,14 +36,14 @@ def _resolve_session(session_id: str | None = None) -> SerialSession:
                 f"No session open on '{session_id}'. "
                 f"Open sessions: {available}. "
                 f"Use list_serial_ports() to discover available ports, "
-                f"then open() to connect."
+                f"then serial_open() to connect."
             )
         return _sessions[session_id]
 
     if len(_sessions) == 0:
         raise RuntimeError(
             "No sessions open. Use list_serial_ports() to discover "
-            "available ports, then open() to connect."
+            "available ports, then serial_open() to connect."
         )
     if len(_sessions) == 1:
         return next(iter(_sessions.values()))
@@ -43,8 +56,15 @@ def _resolve_session(session_id: str | None = None) -> SerialSession:
 # ── Port discovery ───────────────────────────────────────────────────
 
 
-@mcp.tool()
-def list_serial_ports() -> list[dict]:
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def list_serial_ports() -> list[dict]:
     """List all available serial ports on the system.
 
     Returns device path, description, hardware ID, and USB metadata
@@ -75,13 +95,20 @@ def list_serial_ports() -> list[dict]:
 # ── Connection management ────────────────────────────────────────────
 
 
-@mcp.tool()
-def open(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_open(
     port: str,
     baud_rate: int = 115200,
-    data_bits: int = 8,
+    data_bits: Literal[5, 6, 7, 8] = 8,
     stop_bits: float = 1,
-    parity: str = "none",
+    parity: Literal["none", "even", "odd", "mark", "space"] = "none",
     timeout: float = 1.0,
 ) -> dict:
     """Open a serial connection to the specified port.
@@ -89,7 +116,7 @@ def open(
     Common configurations:
     - Most devices: 115200 baud, 8N1 (the defaults)
     - Older equipment: 9600 baud, 8N1
-    - Use detect_baud() first if unsure of the baud rate.
+    - Use serial_detect_baud() first if unsure of the baud rate.
 
     Args:
         port: Serial port device path (e.g. /dev/ttyUSB0, COM3)
@@ -101,18 +128,15 @@ def open(
     """
     if port in _sessions:
         raise RuntimeError(
-            f"A session is already open on {port}. Close it first, "
-            f"or use change_settings() to modify the connection."
+            f"A session is already open on {port}. Close it first with serial_close(), "
+            f"or use serial_change_settings() to modify the connection."
         )
 
-    if data_bits not in (5, 6, 7, 8):
-        raise ValueError(f"Invalid data_bits: {data_bits}. Must be 5, 6, 7, or 8.")
     if stop_bits not in (1, 1.5, 2):
         raise ValueError(f"Invalid stop_bits: {stop_bits}. Must be 1, 1.5, or 2.")
-    if parity not in ("none", "even", "odd", "mark", "space"):
-        raise ValueError(f"Invalid parity: {parity}.")
 
-    session = SerialSession(
+    session = await asyncio.to_thread(
+        SerialSession,
         port=port,
         baud_rate=baud_rate,
         data_bits=data_bits,
@@ -132,8 +156,15 @@ def open(
     }
 
 
-@mcp.tool()
-def close(session_id: str | None = None) -> str:
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_close(session_id: str | None = None) -> str:
     """Close a serial connection.
 
     Args:
@@ -141,18 +172,25 @@ def close(session_id: str | None = None) -> str:
     """
     session = _resolve_session(session_id)
     port = session.port
-    session.close()
+    await asyncio.to_thread(session.close)
     del _sessions[port]
     return f"Closed connection to {port}."
 
 
-@mcp.tool()
-def change_settings(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+async def serial_change_settings(
     session_id: str | None = None,
     baud_rate: int | None = None,
-    data_bits: int | None = None,
+    data_bits: Literal[5, 6, 7, 8] | None = None,
     stop_bits: float | None = None,
-    parity: str | None = None,
+    parity: Literal["none", "even", "odd", "mark", "space"] | None = None,
 ) -> dict:
     """Change serial port settings on an open connection without closing it.
 
@@ -172,16 +210,12 @@ def change_settings(
     if baud_rate is not None:
         kwargs["baud_rate"] = baud_rate
     if data_bits is not None:
-        if data_bits not in (5, 6, 7, 8):
-            raise ValueError(f"Invalid data_bits: {data_bits}. Must be 5, 6, 7, or 8.")
         kwargs["data_bits"] = data_bits
     if stop_bits is not None:
         if stop_bits not in (1, 1.5, 2):
             raise ValueError(f"Invalid stop_bits: {stop_bits}. Must be 1, 1.5, or 2.")
         kwargs["stop_bits"] = stop_bits
     if parity is not None:
-        if parity not in ("none", "even", "odd", "mark", "space"):
-            raise ValueError(f"Invalid parity: {parity}.")
         kwargs["parity"] = parity
 
     if not kwargs:
@@ -201,8 +235,15 @@ def change_settings(
 # ── Command / expect ─────────────────────────────────────────────────
 
 
-@mcp.tool()
-def command(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_command(
     data: str,
     expect: str | None = None,
     timeout: float = 5.0,
@@ -219,10 +260,10 @@ def command(
     of silence after last received byte).
 
     Examples:
-        - Linux shell: command(data="ls -la", expect="\\\\$")
-        - AT modem:    command(data="AT", expect="OK|ERROR")
-        - Router CLI:  command(data="show version", expect="#")
-        - Simple ping: command(data="hello", timeout=2)
+        - Linux shell: serial_command(data="ls -la", expect="\\\\$")
+        - AT modem:    serial_command(data="AT", expect="OK|ERROR")
+        - Router CLI:  serial_command(data="show version", expect="#")
+        - Simple ping: serial_command(data="hello", timeout=2)
 
     Args:
         data: Text to send to the device
@@ -238,13 +279,22 @@ def command(
         data += "\r\n"
 
     raw = data.encode(encoding)
-    result = session.command(raw, expect=expect, timeout=timeout, encoding=encoding)
+    result = await asyncio.to_thread(
+        session.command, raw, expect=expect, timeout=timeout, encoding=encoding
+    )
     result["session_id"] = session.port
     return result
 
 
-@mcp.tool()
-def wait_for(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+)
+async def serial_wait_for(
     pattern: str,
     timeout: float = 10.0,
     session_id: str | None = None,
@@ -258,10 +308,10 @@ def wait_for(
     states before interacting.
 
     Examples:
-        - Wait for login:  wait_for(pattern="login:")
-        - Wait for U-Boot: wait_for(pattern="U-Boot", timeout=30)
-        - Wait for prompt:  wait_for(pattern="[$#>]\\\\s*$")
-        - Wait for ready:   wait_for(pattern="System ready", timeout=60)
+        - Wait for login:  serial_wait_for(pattern="login:")
+        - Wait for U-Boot: serial_wait_for(pattern="U-Boot", timeout=30)
+        - Wait for prompt:  serial_wait_for(pattern="[$#>]\\\\s*$")
+        - Wait for ready:   serial_wait_for(pattern="System ready", timeout=60)
 
     Args:
         pattern: Regex pattern to wait for
@@ -270,7 +320,9 @@ def wait_for(
         encoding: Character encoding (default utf-8)
     """
     session = _resolve_session(session_id)
-    result = session.wait_for(pattern=pattern, timeout=timeout, encoding=encoding)
+    result = await asyncio.to_thread(
+        session.wait_for, pattern=pattern, timeout=timeout, encoding=encoding
+    )
     result["session_id"] = session.port
     return result
 
@@ -278,8 +330,15 @@ def wait_for(
 # ── Text read/write ──────────────────────────────────────────────────
 
 
-@mcp.tool()
-def write(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_write(
     data: str,
     session_id: str | None = None,
     encoding: str = "utf-8",
@@ -287,8 +346,8 @@ def write(
 ) -> dict:
     """Write data to the open serial port.
 
-    For most interactions, prefer command() which writes and waits for the
-    response in one step. Use write() for fire-and-forget or when you need
+    For most interactions, prefer serial_command() which writes and waits for the
+    response in one step. Use serial_write() for fire-and-forget or when you need
     manual timing control.
 
     Args:
@@ -303,12 +362,19 @@ def write(
         data += "\r\n"
 
     raw = data.encode(encoding)
-    count = session.write(raw)
+    count = await asyncio.to_thread(session.write, raw)
     return {"bytes_written": count, "session_id": session.port}
 
 
-@mcp.tool()
-def read(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+)
+async def serial_read(
     session_id: str | None = None,
     timeout: float = 1.0,
     encoding: str = "utf-8",
@@ -318,8 +384,8 @@ def read(
     Returns everything received since the last read, then advances the cursor.
     If no new data is available, waits up to timeout seconds for data to arrive.
 
-    For most interactions, prefer command() which writes and reads in one step.
-    Use read() when passively monitoring or after a manual write().
+    For most interactions, prefer serial_command() which writes and reads in one step.
+    Use serial_read() when passively monitoring or after a manual serial_write().
 
     Args:
         session_id: Port name of the session to read from. Optional if only one session is open.
@@ -327,21 +393,30 @@ def read(
         encoding: Character encoding for decoding the data
     """
     session = _resolve_session(session_id)
-    result = session.read_buffer(timeout=timeout, encoding=encoding)
+    result = await asyncio.to_thread(
+        session.read_buffer, timeout=timeout, encoding=encoding
+    )
     result["session_id"] = session.port
     return result
 
 
-@mcp.tool()
-def read_since(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def serial_read_since(
     session_id: str | None = None,
     since: float | None = None,
     encoding: str = "utf-8",
 ) -> dict:
     """Read historical data received since a given timestamp (non-destructive).
 
-    Unlike read(), this does NOT advance the read cursor — calling read_since
-    will not affect what read() returns next. If since is omitted, returns all
+    Unlike serial_read(), this does NOT advance the read cursor — calling serial_read_since
+    will not affect what serial_read() returns next. If since is omitted, returns all
     data received since the session was opened.
 
     Args:
@@ -359,8 +434,15 @@ def read_since(
 # ── Binary / hex read/write ──────────────────────────────────────────
 
 
-@mcp.tool()
-def write_hex(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_write_hex(
     hex_string: str,
     session_id: str | None = None,
 ) -> dict:
@@ -371,9 +453,9 @@ def write_hex(
     No newline is appended.
 
     Examples:
-        - Send Modbus query: write_hex(hex_string="01 03 00 00 00 0A C5 CD")
-        - Send break byte:   write_hex(hex_string="FF")
-        - STM32 bootloader:  write_hex(hex_string="7F")
+        - Send Modbus query: serial_write_hex(hex_string="01 03 00 00 00 0A C5 CD")
+        - Send break byte:   serial_write_hex(hex_string="FF")
+        - STM32 bootloader:  serial_write_hex(hex_string="7F")
 
     Args:
         hex_string: Hex-encoded bytes separated by spaces (e.g. "AA 55 01 03 FF")
@@ -387,7 +469,7 @@ def write_hex(
             f"Invalid hex string: {e}. "
             f"Expected format: 'AA 55 01 03' or 'AA550103'"
         ) from e
-    count = session.write(raw)
+    count = await asyncio.to_thread(session.write, raw)
     return {
         "bytes_written": count,
         "hex_sent": raw.hex(" "),
@@ -395,14 +477,21 @@ def write_hex(
     }
 
 
-@mcp.tool()
-def read_hex(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+)
+async def serial_read_hex(
     session_id: str | None = None,
     timeout: float = 1.0,
 ) -> dict:
     """Read buffered data as hex-encoded bytes (for binary protocols).
 
-    Like read() but returns data as a hex string instead of decoded text.
+    Like serial_read() but returns data as a hex string instead of decoded text.
     Advances the read cursor.
 
     Args:
@@ -410,7 +499,7 @@ def read_hex(
         timeout: Seconds to wait for data if buffer is empty
     """
     session = _resolve_session(session_id)
-    result = session.read_buffer_hex(timeout=timeout)
+    result = await asyncio.to_thread(session.read_buffer_hex, timeout=timeout)
     result["session_id"] = session.port
     return result
 
@@ -418,8 +507,15 @@ def read_hex(
 # ── Hardware signals ─────────────────────────────────────────────────
 
 
-@mcp.tool()
-def set_signals(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+async def serial_set_signals(
     dtr: bool | None = None,
     rts: bool | None = None,
     session_id: str | None = None,
@@ -433,9 +529,9 @@ def set_signals(
     - Implement hardware flow control
 
     Examples:
-        - Reset Arduino:      set_signals(dtr=False); set_signals(dtr=True)
-        - ESP32 bootloader:   set_signals(dtr=False, rts=True) then
-                              set_signals(dtr=True, rts=False)
+        - Reset Arduino:      serial_set_signals(dtr=False); serial_set_signals(dtr=True)
+        - ESP32 bootloader:   serial_set_signals(dtr=False, rts=True) then
+                              serial_set_signals(dtr=True, rts=False)
 
     Args:
         dtr: Set DTR signal high (True) or low (False). None leaves it unchanged.
@@ -446,8 +542,15 @@ def set_signals(
     return session.set_signals(dtr=dtr, rts=rts)
 
 
-@mcp.tool()
-def get_signals(session_id: str | None = None) -> dict:
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def serial_get_signals(session_id: str | None = None) -> dict:
     """Read the current state of all serial control signals.
 
     Returns: DTR, RTS (output signals you control) and CTS, DSR, RI, CD
@@ -463,8 +566,15 @@ def get_signals(session_id: str | None = None) -> dict:
     return result
 
 
-@mcp.tool()
-def send_break(
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_send_break(
     duration: float = 0.25,
     session_id: str | None = None,
 ) -> dict:
@@ -482,7 +592,7 @@ def send_break(
         session_id: Port name of the session. Optional if only one session is open.
     """
     session = _resolve_session(session_id)
-    session.send_break(duration)
+    await asyncio.to_thread(session.send_break, duration)
     return {
         "break_sent": True,
         "duration": duration,
@@ -492,9 +602,58 @@ def send_break(
 
 # ── Baud rate detection ──────────────────────────────────────────────
 
+_COMMON_BAUD_RATES = [115200, 9600, 57600, 38400, 19200, 4800, 2400, 1200]
 
-@mcp.tool()
-def detect_baud(
+
+def _test_baud_rate(port: str, baud: int, probe: bool) -> dict | None:
+    """Test a single baud rate. Returns result dict or None on failure."""
+    try:
+        s = serial.Serial(port, baud, timeout=0.5)
+        time.sleep(0.1)
+
+        # Drain any stale data
+        if s.in_waiting:
+            s.read(s.in_waiting)
+
+        if probe:
+            s.write(b"\r\n")
+            time.sleep(0.5)
+        else:
+            time.sleep(1.0)
+
+        data = b""
+        if s.in_waiting:
+            data = s.read(s.in_waiting)
+
+        s.close()
+
+        if data:
+            printable = sum(
+                1 for b in data
+                if 32 <= b <= 126 or b in (10, 13, 9)
+            )
+            ratio = round(printable / len(data), 2)
+            return {
+                "baud_rate": baud,
+                "readable_ratio": ratio,
+                "bytes_received": len(data),
+                "sample": data.decode("ascii", errors="replace")[:200],
+            }
+    except serial.SerialException:
+        pass
+    return None
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+async def serial_detect_baud(
+    ctx: Context,
     port: str,
     probe: bool = True,
 ) -> dict:
@@ -502,7 +661,7 @@ def detect_baud(
     checking which one produces readable ASCII output.
 
     Opens and closes the port internally — the port must NOT have an active
-    session. After detection, use open() with the recommended baud rate.
+    session. After detection, use serial_open() with the recommended baud rate.
 
     If `probe` is True (default), sends \\r\\n at each baud rate to elicit a
     response. Set to False for passive listening (e.g. if the device sends
@@ -514,47 +673,15 @@ def detect_baud(
     """
     if port in _sessions:
         raise RuntimeError(
-            f"Port {port} has an active session. Close it first with close()."
+            f"Port {port} has an active session. Close it first with serial_close()."
         )
 
-    candidates = [115200, 9600, 57600, 38400, 19200, 4800, 2400, 1200]
     results = []
-
-    for baud in candidates:
-        try:
-            s = serial.Serial(port, baud, timeout=0.5)
-            time.sleep(0.1)
-
-            # Drain any stale data
-            if s.in_waiting:
-                s.read(s.in_waiting)
-
-            if probe:
-                s.write(b"\r\n")
-                time.sleep(0.5)
-            else:
-                time.sleep(1.0)
-
-            data = b""
-            if s.in_waiting:
-                data = s.read(s.in_waiting)
-
-            s.close()
-
-            if data:
-                printable = sum(
-                    1 for b in data
-                    if 32 <= b <= 126 or b in (10, 13, 9)
-                )
-                ratio = round(printable / len(data), 2)
-                results.append({
-                    "baud_rate": baud,
-                    "readable_ratio": ratio,
-                    "bytes_received": len(data),
-                    "sample": data.decode("ascii", errors="replace")[:200],
-                })
-        except serial.SerialException:
-            continue
+    for i, baud in enumerate(_COMMON_BAUD_RATES):
+        await ctx.report_progress(i, len(_COMMON_BAUD_RATES))
+        result = await asyncio.to_thread(_test_baud_rate, port, baud, probe)
+        if result:
+            results.append(result)
 
     results.sort(key=lambda x: x["readable_ratio"], reverse=True)
 
@@ -575,8 +702,15 @@ def detect_baud(
 # ── Session management ───────────────────────────────────────────────
 
 
-@mcp.tool()
-def clear_history(session_id: str | None = None) -> dict:
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def serial_clear_history(session_id: str | None = None) -> dict:
     """Clear the receive history buffer for a session.
 
     Resets the read cursor and frees memory. Useful for long-running sessions
@@ -590,8 +724,15 @@ def clear_history(session_id: str | None = None) -> dict:
     return {"cleared": True, "session_id": session.port}
 
 
-@mcp.tool()
-def list_sessions() -> dict:
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def serial_list_sessions() -> dict:
     """List all open serial sessions with connection details."""
     return {
         "session_count": len(_sessions),
@@ -608,8 +749,15 @@ def list_sessions() -> dict:
     }
 
 
-@mcp.tool()
-def status(session_id: str | None = None) -> dict:
+@mcp.tool(
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def serial_status(session_id: str | None = None) -> dict:
     """Get the current serial session status including connection health.
 
     Reports whether the device is still connected, bytes buffered, total
@@ -687,7 +835,7 @@ def detect_baud_rate(port: str) -> str:
     """Detect the correct baud rate for a serial device."""
     return (
         f"Detect the correct baud rate on port {port}:\n"
-        f"1. Call detect_baud(port=\"{port}\") to try common baud rates\n"
+        f"1. Call serial_detect_baud(port=\"{port}\") to try common baud rates\n"
         "2. Review the readable_ratio for each result — higher means more "
         "likely correct\n"
         "3. Report the recommended baud rate and confidence level\n"
@@ -700,11 +848,11 @@ def interactive_shell(port: str, baud_rate: int = 115200) -> str:
     """Open an interactive serial shell session."""
     return (
         f"Start an interactive session on {port} at {baud_rate} baud:\n"
-        f"1. Call open(port=\"{port}\", baud_rate={baud_rate})\n"
+        f"1. Call serial_open(port=\"{port}\", baud_rate={baud_rate})\n"
         "2. Send a few carriage returns to wake the device: "
-        "command(data=\"\", timeout=2)\n"
+        "serial_command(data=\"\", timeout=2)\n"
         "3. Examine the response to identify the device and its prompt\n"
-        "4. You are now ready to send commands. Use command() with the "
+        "4. You are now ready to send commands. Use serial_command() with the "
         "expect parameter set to the device's prompt pattern for reliable "
         "interaction."
     )
