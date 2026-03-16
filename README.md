@@ -16,19 +16,49 @@ Exposes serial ports as MCP tools so an AI assistant can:
 
 ## Install
 
+### With `uv` (recommended)
+
+Install globally so the `serial-mcp` command is available everywhere:
+
 ```sh
-uv pip install .
+uv tool install serial-mcp
 ```
 
-Or with pip:
+Or from a local clone:
 
 ```sh
-pip install .
+uv tool install /path/to/serial-mcp
+```
+
+### With pip
+
+```sh
+pip install serial-mcp
+```
+
+### From source (editable)
+
+```sh
+git clone https://github.com/alxgmpr/serial-mcp.git
+cd serial-mcp
+uv pip install -e .
 ```
 
 ## Configure
 
-Add to your MCP client config:
+### Claude Code
+
+```sh
+claude mcp add serial-mcp -- serial-mcp
+```
+
+That's it. Verify with `claude mcp list`.
+
+If you installed from source instead of globally, use the full path:
+
+```sh
+claude mcp add serial-mcp -- python3 -m serial_mcp.server
+```
 
 ### Claude Desktop (`claude_desktop_config.json`)
 
@@ -36,21 +66,7 @@ Add to your MCP client config:
 {
   "mcpServers": {
     "serial": {
-      "command": "python3",
-      "args": ["-m", "serial_mcp.server"]
-    }
-  }
-}
-```
-
-### Claude Code (`.claude/settings.json`)
-
-```json
-{
-  "mcpServers": {
-    "serial": {
-      "command": "python3",
-      "args": ["-m", "serial_mcp.server"]
+      "command": "serial-mcp"
     }
   }
 }
