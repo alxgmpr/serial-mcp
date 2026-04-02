@@ -7,3 +7,4 @@ dist/
 build/
 .eggs/
 *.mcpb
+.remember/
