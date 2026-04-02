@@ -703,6 +703,61 @@ async def serial_clear_history(session_id: str | None = None) -> dict:
 
 @mcp.tool(
     annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+)
+async def serial_log_start(
+    file_path: str,
+    session_id: str | None = None,
+    append: bool = False,
+) -> dict:
+    """Start logging all received serial data to a file.
+
+    Creates a timestamped log file capturing everything the device sends.
+    Similar to minicom's capture feature. Only one log file per session.
+
+    Args:
+        file_path: Path to the log file to create/write
+        session_id: Port name of the session. Optional if only one session is open.
+        append: If True, append to existing file instead of overwriting
+    """
+    session = _resolve_session(session_id)
+    session.start_logging(file_path, append=append)
+    return {
+        "logging": True,
+        "file_path": file_path,
+        "append": append,
+        "session_id": session.port,
+    }
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def serial_log_stop(session_id: str | None = None) -> dict:
+    """Stop logging serial data and close the log file.
+
+    Returns the log file path, total bytes logged, and duration.
+
+    Args:
+        session_id: Port name of the session. Optional if only one session is open.
+    """
+    session = _resolve_session(session_id)
+    result = session.stop_logging()
+    result["session_id"] = session.port
+    return result
+
+
+@mcp.tool(
+    annotations={
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
