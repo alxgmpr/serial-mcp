@@ -100,7 +100,8 @@ async def list_serial_ports() -> list[dict]:
     }
 )
 async def serial_open(
-    port: str,
+    ctx: Context,
+    port: str | None = None,
     baud_rate: int = 115200,
     data_bits: Literal[5, 6, 7, 8] = 8,
     stop_bits: float = 1,
@@ -109,19 +110,47 @@ async def serial_open(
 ) -> dict:
     """Open a serial connection to the specified port.
 
+    If port is omitted, automatically discovers available ports. When only one
+    port is found it is used directly; when multiple are found, elicitation is
+    used to let the user pick one.
+
     Common configurations:
     - Most devices: 115200 baud, 8N1 (the defaults)
     - Older equipment: 9600 baud, 8N1
     - Use serial_detect_baud() first if unsure of the baud rate.
 
     Args:
-        port: Serial port device path (e.g. /dev/ttyUSB0, COM3)
+        port: Serial port device path (e.g. /dev/ttyUSB0, COM3). Optional — omit to auto-discover.
         baud_rate: Baud rate for the connection
         data_bits: Number of data bits (5, 6, 7, or 8)
         stop_bits: Number of stop bits (1, 1.5, or 2)
         parity: Parity checking ("none", "even", "odd", "mark", "space")
         timeout: Read timeout in seconds
     """
+    # If no port specified, try to elicit a choice
+    if port is None:
+        ports = [p.device for p in list_ports.comports()]
+        if not ports:
+            raise RuntimeError("No serial ports found. Check that a device is connected.")
+        if len(ports) == 1:
+            port = ports[0]
+        else:
+            try:
+                result = await ctx.elicit(
+                    "Multiple serial ports found. Select one:",
+                    response_type=ports,
+                )
+                if result.action == "accept" and result.data:
+                    port = result.data
+                else:
+                    return {"error": "Port selection cancelled. Call serial_open(port=...) with a specific port."}
+            except Exception:
+                # Elicitation not supported — return port list for the LLM to relay
+                return {
+                    "available_ports": ports,
+                    "message": "Multiple ports found. Please call serial_open() again with one of the listed ports.",
+                }
+
     if port in _sessions:
         raise RuntimeError(
             f"A session is already open on {port}. Close it first with serial_close(), "
@@ -664,14 +693,38 @@ async def serial_detect_baud(
 
     results.sort(key=lambda x: x["readable_ratio"], reverse=True)
 
+    if not results:
+        return {
+            "port": port,
+            "results": results,
+            "recommended": None,
+            "message": ("No data received at any baud rate. Check wiring and that the device is powered on."),
+        }
+
+    # Try to elicit baud rate confirmation
+    top_results = results[:3]
+    choices = [f"{r['baud_rate']} ({int(r['readable_ratio'] * 100)}% readable)" for r in top_results]
+
+    selected_baud = results[0]["baud_rate"]
+    try:
+        elicit_result = await ctx.elicit(
+            f"Baud rate detection complete for {port}. Confirm rate:",
+            response_type=choices,
+        )
+        if elicit_result.action == "accept" and elicit_result.data:
+            # Parse baud rate from the selection string (e.g., "115200 (98% readable)")
+            selected_baud = int(elicit_result.data.split(" ")[0])
+    except Exception:
+        # Elicitation not supported — use top result
+        pass
+
     return {
         "port": port,
         "results": results,
-        "recommended": results[0]["baud_rate"] if results else None,
+        "recommended": selected_baud,
         "message": (
-            f"Best match: {results[0]['baud_rate']} baud ({int(results[0]['readable_ratio'] * 100)}% readable)"
-            if results
-            else "No data received at any baud rate. Check wiring and that the device is powered on."
+            f"Best match: {selected_baud} baud "
+            f"({int(next(r['readable_ratio'] for r in results if r['baud_rate'] == selected_baud) * 100)}% readable)"
         ),
     }
 
