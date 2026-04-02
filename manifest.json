@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "serial-mcp",
+  "version": "0.4.0",
+  "description": "Communicate with serial devices — microcontrollers, routers, modems, embedded Linux.",
+  "author": { "name": "Alex Gompper" },
+  "server": {
+    "type": "python",
+    "entry_point": "server/run.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["${__dirname}/server/run.py"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "python": ">=3.10" }
+  },
+  "homepage": "https://github.com/alxgmpr/serial-mcp",
+  "repository": "https://github.com/alxgmpr/serial-mcp",
+  "license": "MIT",
+  "keywords": ["serial", "uart", "embedded", "iot", "pyserial", "xmodem"]
+}
