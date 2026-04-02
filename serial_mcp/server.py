@@ -4,7 +4,7 @@ import time
 from typing import Literal
 
 import serial
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import Context, FastMCP
 from serial.tools import list_ports
 
 from serial_mcp.session import SerialSession
@@ -42,15 +42,11 @@ def _resolve_session(session_id: str | None = None) -> SerialSession:
 
     if len(_sessions) == 0:
         raise RuntimeError(
-            "No sessions open. Use list_serial_ports() to discover "
-            "available ports, then serial_open() to connect."
+            "No sessions open. Use list_serial_ports() to discover available ports, then serial_open() to connect."
         )
     if len(_sessions) == 1:
         return next(iter(_sessions.values()))
-    raise RuntimeError(
-        f"Multiple sessions open ({list(_sessions.keys())}). "
-        "Specify session_id to select one."
-    )
+    raise RuntimeError(f"Multiple sessions open ({list(_sessions.keys())}). Specify session_id to select one.")
 
 
 # ── Port discovery ───────────────────────────────────────────────────
@@ -148,10 +144,7 @@ async def serial_open(
 
     return {
         "session_id": port,
-        "message": (
-            f"Connected to {port} at {baud_rate} baud "
-            f"({data_bits}{parity[0].upper()}{stop_bits})"
-        ),
+        "message": (f"Connected to {port} at {baud_rate} baud ({data_bits}{parity[0].upper()}{stop_bits})"),
         "connected_at": session.connected_at,
     }
 
@@ -279,9 +272,7 @@ async def serial_command(
         data += "\r\n"
 
     raw = data.encode(encoding)
-    result = await asyncio.to_thread(
-        session.command, raw, expect=expect, timeout=timeout, encoding=encoding
-    )
+    result = await asyncio.to_thread(session.command, raw, expect=expect, timeout=timeout, encoding=encoding)
     result["session_id"] = session.port
     return result
 
@@ -320,9 +311,7 @@ async def serial_wait_for(
         encoding: Character encoding (default utf-8)
     """
     session = _resolve_session(session_id)
-    result = await asyncio.to_thread(
-        session.wait_for, pattern=pattern, timeout=timeout, encoding=encoding
-    )
+    result = await asyncio.to_thread(session.wait_for, pattern=pattern, timeout=timeout, encoding=encoding)
     result["session_id"] = session.port
     return result
 
@@ -393,9 +382,7 @@ async def serial_read(
         encoding: Character encoding for decoding the data
     """
     session = _resolve_session(session_id)
-    result = await asyncio.to_thread(
-        session.read_buffer, timeout=timeout, encoding=encoding
-    )
+    result = await asyncio.to_thread(session.read_buffer, timeout=timeout, encoding=encoding)
     result["session_id"] = session.port
     return result
 
@@ -465,10 +452,7 @@ async def serial_write_hex(
     try:
         raw = bytes.fromhex(hex_string.replace(" ", ""))
     except ValueError as e:
-        raise ValueError(
-            f"Invalid hex string: {e}. "
-            f"Expected format: 'AA 55 01 03' or 'AA550103'"
-        ) from e
+        raise ValueError(f"Invalid hex string: {e}. Expected format: 'AA 55 01 03' or 'AA550103'") from e
     count = await asyncio.to_thread(session.write, raw)
     return {
         "bytes_written": count,
@@ -628,10 +612,7 @@ def _test_baud_rate(port: str, baud: int, probe: bool) -> dict | None:
         s.close()
 
         if data:
-            printable = sum(
-                1 for b in data
-                if 32 <= b <= 126 or b in (10, 13, 9)
-            )
+            printable = sum(1 for b in data if 32 <= b <= 126 or b in (10, 13, 9))
             ratio = round(printable / len(data), 2)
             return {
                 "baud_rate": baud,
@@ -672,9 +653,7 @@ async def serial_detect_baud(
         probe: Whether to send \\r\\n to prompt a response (default True)
     """
     if port in _sessions:
-        raise RuntimeError(
-            f"Port {port} has an active session. Close it first with serial_close()."
-        )
+        raise RuntimeError(f"Port {port} has an active session. Close it first with serial_close().")
 
     results = []
     for i, baud in enumerate(_COMMON_BAUD_RATES):
@@ -690,11 +669,9 @@ async def serial_detect_baud(
         "results": results,
         "recommended": results[0]["baud_rate"] if results else None,
         "message": (
-            f"Best match: {results[0]['baud_rate']} baud "
-            f"({int(results[0]['readable_ratio'] * 100)}% readable)"
-            if results else
-            "No data received at any baud rate. Check wiring and that "
-            "the device is powered on."
+            f"Best match: {results[0]['baud_rate']} baud ({int(results[0]['readable_ratio'] * 100)}% readable)"
+            if results
+            else "No data received at any baud rate. Check wiring and that the device is powered on."
         ),
     }
 
@@ -835,7 +812,7 @@ def detect_baud_rate(port: str) -> str:
     """Detect the correct baud rate for a serial device."""
     return (
         f"Detect the correct baud rate on port {port}:\n"
-        f"1. Call serial_detect_baud(port=\"{port}\") to try common baud rates\n"
+        f'1. Call serial_detect_baud(port="{port}") to try common baud rates\n'
         "2. Review the readable_ratio for each result — higher means more "
         "likely correct\n"
         "3. Report the recommended baud rate and confidence level\n"
@@ -848,9 +825,9 @@ def interactive_shell(port: str, baud_rate: int = 115200) -> str:
     """Open an interactive serial shell session."""
     return (
         f"Start an interactive session on {port} at {baud_rate} baud:\n"
-        f"1. Call serial_open(port=\"{port}\", baud_rate={baud_rate})\n"
+        f'1. Call serial_open(port="{port}", baud_rate={baud_rate})\n'
         "2. Send a few carriage returns to wake the device: "
-        "serial_command(data=\"\", timeout=2)\n"
+        'serial_command(data="", timeout=2)\n'
         "3. Examine the response to identify the device and its prompt\n"
         "4. You are now ready to send commands. Use serial_command() with the "
         "expect parameter set to the device's prompt pattern for reliable "

@@ -8,8 +8,16 @@ import serial
 class SerialSession:
     """Manages a single serial port connection with a background reader thread."""
 
-    def __init__(self, port: str, baud_rate: int, data_bits: int, stop_bits: float,
-                 parity: str, timeout: float, max_history_bytes: int = 10_000_000):
+    def __init__(
+        self,
+        port: str,
+        baud_rate: int,
+        data_bits: int,
+        stop_bits: float,
+        parity: str,
+        timeout: float,
+        max_history_bytes: int = 10_000_000,
+    ):
         parity_map = {
             "none": serial.PARITY_NONE,
             "even": serial.PARITY_EVEN,
@@ -110,7 +118,7 @@ class SerialSession:
             self._data_event.wait(timeout=timeout)
 
         with self._lock:
-            new_chunks = self._history[self._read_cursor:]
+            new_chunks = self._history[self._read_cursor :]
             self._read_cursor = len(self._history)
 
         data = b"".join(chunk for _, chunk in new_chunks)
@@ -129,7 +137,7 @@ class SerialSession:
             self._data_event.wait(timeout=timeout)
 
         with self._lock:
-            new_chunks = self._history[self._read_cursor:]
+            new_chunks = self._history[self._read_cursor :]
             self._read_cursor = len(self._history)
 
         data = b"".join(chunk for _, chunk in new_chunks)
@@ -174,9 +182,14 @@ class SerialSession:
 
     # ── Command / expect operations ──────────────────────────────────
 
-    def command(self, data: bytes, expect: str | None = None,
-                timeout: float = 5.0, encoding: str = "utf-8",
-                settle_time: float = 0.3) -> dict:
+    def command(
+        self,
+        data: bytes,
+        expect: str | None = None,
+        timeout: float = 5.0,
+        encoding: str = "utf-8",
+        settle_time: float = 0.3,
+    ) -> dict:
         """Send data and wait for the response.
 
         If `expect` is a regex pattern, waits until it matches in the response.
@@ -222,15 +235,13 @@ class SerialSession:
             "timed_out": last_change_time is None,
         }
 
-    def wait_for(self, pattern: str, timeout: float = 10.0,
-                 encoding: str = "utf-8") -> dict:
+    def wait_for(self, pattern: str, timeout: float = 10.0, encoding: str = "utf-8") -> dict:
         """Wait for a regex pattern to appear in incoming data."""
         with self._lock:
             start_cursor = len(self._history)
         return self._wait_for_pattern(pattern, timeout, encoding, start_cursor)
 
-    def _wait_for_pattern(self, pattern: str, timeout: float,
-                          encoding: str, start_cursor: int) -> dict:
+    def _wait_for_pattern(self, pattern: str, timeout: float, encoding: str, start_cursor: int) -> dict:
         """Wait for a regex pattern to appear in data received after start_cursor."""
         compiled = re.compile(pattern)
         deadline = time.time() + timeout
@@ -349,7 +360,7 @@ class SerialSession:
     def bytes_in_buffer(self) -> int:
         """Unread bytes (not yet consumed by read_buffer)."""
         with self._lock:
-            return sum(len(chunk) for _, chunk in self._history[self._read_cursor:])
+            return sum(len(chunk) for _, chunk in self._history[self._read_cursor :])
 
     @property
     def total_bytes_received(self) -> int:
