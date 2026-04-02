@@ -20,17 +20,27 @@ DANGEROUSLY_OMIT_AUTH=true npx @modelcontextprotocol/inspector -- python3 -m ser
 
 # Install dependencies only
 uv pip install -r requirements.txt
-```
 
-There are no tests, linting, or CI configured yet.
+# Run tests
+pytest -v
+
+# Lint
+ruff check serial_mcp/ tests/
+ruff format --check serial_mcp/ tests/
+
+# Build MCPB bundle
+./scripts/build-mcpb.sh
+```
 
 ## Architecture
 
 Two-file architecture in `serial_mcp/`:
 
-- **server.py** — FastMCP server exposing ~18 async tools (all prefixed `serial_*`) and 3 prompts. Maintains a global `_sessions` dict keyed by port name with atexit cleanup. `_resolve_session()` auto-selects when only one session is open. All tools include MCP annotations (readOnlyHint, destructiveHint, etc.). Blocking serial I/O is wrapped in `asyncio.to_thread()`. Tools are grouped: port discovery, connection management, text read/write, binary/hex read/write, hardware signal control, and session utilities.
+- **server.py** — FastMCP server exposing ~22 async tools (all prefixed `serial_*`) and 3 prompts. Maintains a global `_sessions` dict keyed by port name with atexit cleanup. `_resolve_session()` auto-selects when only one session is open. All tools include MCP annotations (readOnlyHint, destructiveHint, etc.). Blocking serial I/O is wrapped in `asyncio.to_thread()`. Tools are grouped: port discovery, connection management, text read/write, binary/hex read/write, hardware signal control, session utilities, XMODEM file transfer, and logging. Supports elicitation for interactive port and baud selection.
 
 - **session.py** — `SerialSession` class managing individual serial connections. Runs a daemon background reader thread that stores data in a timestamped ring buffer (10MB default cap). Supports both destructive reads (`read_buffer`) and non-destructive historical reads (`read_since`). Thread safety via `threading.Lock` for history and `threading.Event` for data availability and shutdown signaling.
+
+- **xmodem.py** — Pure-Python XMODEM send/receive. Takes read/write callables for testability. Supports checksum and CRC-16 modes.
 
 Entry point: `serial_mcp.server:main()` (registered as `serial-mcp` console script via pyproject.toml/Hatchling).
 
@@ -40,6 +50,7 @@ Entry point: `serial_mcp.server:main()` (registered as `serial-mcp` console scri
 - **Pattern matching**: `serial_command()` waits for a regex match OR 300ms of silence. `serial_wait_for()` blocks until a pattern appears or timeout.
 - **Hardware signals**: Full DTR/RTS control and CTS/DSR/RI/CD readback for reset sequences and bootloader entry.
 - **Baud detection**: Tries 8 common rates, scores readability by printable ASCII ratio, optional `\r\n` probing.
+- **XMODEM file transfer**: Pure-Python implementation with reader thread pause/resume. Uses callable abstraction for testability.
 
 ## Dependencies
 
