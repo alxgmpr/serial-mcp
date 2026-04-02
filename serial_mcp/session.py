@@ -62,6 +62,12 @@ class SerialSession:
         self._disconnected = False
         self._disconnect_reason: str | None = None
 
+        # Logging
+        self._log_file = None
+        self._log_path: str | None = None
+        self._log_start_time: float | None = None
+        self._log_bytes = 0
+
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
 
@@ -80,6 +86,18 @@ class SerialSession:
                             self._total_bytes_received += len(data)
                             self._trim_history()
                         self._data_event.set()
+                        # Log to file if active
+                        if self._log_file is not None:
+                            try:
+                                from datetime import datetime, timezone
+
+                                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+                                text = data.decode("utf-8", errors="replace")
+                                self._log_file.write(f"[{ts}] {text}\n")
+                                self._log_file.flush()
+                                self._log_bytes += len(data)
+                            except Exception:
+                                pass  # Don't let logging errors kill the reader
                 else:
                     time.sleep(0.01)
             except serial.SerialException as e:
@@ -354,6 +372,39 @@ class SerialSession:
             self._serial.parity = parity_map[kwargs["parity"]]
             self.parity = kwargs["parity"]
 
+    # ── Logging ─────────────────────────────────────────────────────
+
+    @property
+    def is_logging(self) -> bool:
+        return self._log_file is not None
+
+    def start_logging(self, file_path: str, append: bool = False) -> None:
+        """Start logging received data to a file."""
+        with self._lock:
+            if self._log_file is not None:
+                raise RuntimeError("Already logging. Call stop_logging() first.")
+            mode = "a" if append else "w"
+            self._log_file = open(file_path, mode, encoding="utf-8")
+            self._log_start_time = time.time()
+            self._log_bytes = 0
+            self._log_path = file_path
+
+    def stop_logging(self) -> dict:
+        """Stop logging and close the log file. Returns stats."""
+        with self._lock:
+            if self._log_file is None:
+                return {"file_path": None, "bytes_logged": 0, "duration": 0}
+            self._log_file.close()
+            result = {
+                "file_path": self._log_path,
+                "bytes_logged": self._log_bytes,
+                "duration": round(time.time() - self._log_start_time, 1),
+            }
+            self._log_file = None
+            self._log_start_time = None
+            self._log_bytes = 0
+            return result
+
     # ── Properties ───────────────────────────────────────────────────
 
     @property
@@ -393,6 +444,8 @@ class SerialSession:
 
     def close(self) -> None:
         """Stops the reader thread and closes the serial port."""
+        if self._log_file is not None:
+            self.stop_logging()
         self._stop_event.set()
         self._data_event.set()  # unblock any waiting read_buffer() call
         self._reader_thread.join(timeout=2.0)
