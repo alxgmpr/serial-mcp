@@ -9,8 +9,8 @@ serial-mcp is an MCP (Model Context Protocol) server that enables LLMs to commun
 ## Build & Run Commands
 
 ```bash
-# Install (editable)
-uv pip install -e .
+# Install (editable, with dev dependencies)
+uv pip install -e ".[dev]"
 
 # Run the MCP server
 python3 -m serial_mcp.server
@@ -34,7 +34,7 @@ ruff format --check serial_mcp/ tests/
 
 ## Architecture
 
-Two-file architecture in `serial_mcp/`:
+Three-file architecture in `serial_mcp/`:
 
 - **server.py** — FastMCP server exposing ~22 async tools (all prefixed `serial_*`) and 3 prompts. Maintains a global `_sessions` dict keyed by port name with atexit cleanup. `_resolve_session()` auto-selects when only one session is open. All tools include MCP annotations (readOnlyHint, destructiveHint, etc.). Blocking serial I/O is wrapped in `asyncio.to_thread()`. Tools are grouped: port discovery, connection management, text read/write, binary/hex read/write, hardware signal control, session utilities, XMODEM file transfer, and logging. Supports elicitation for interactive port and baud selection.
 
@@ -52,6 +52,17 @@ Entry point: `serial_mcp.server:main()` (registered as `serial-mcp` console scri
 - **Baud detection**: Tries 8 common rates, scores readability by printable ASCII ratio, optional `\r\n` probing.
 - **XMODEM file transfer**: Pure-Python implementation with reader thread pause/resume. Uses callable abstraction for testability.
 
+## Testing
+
+27 unit tests using pytest with a `MockSerial` fixture (no real hardware needed). Tests cover session buffer management, pattern matching, history trimming, logging, XMODEM protocol, and server tool resolution.
+
+Run: `pytest -v` (requires dev dependencies: `uv pip install -e ".[dev]"`)
+
+## Gotchas
+
+- **XMODEM pauses the reader thread**: During `serial_xmodem_send`/`serial_xmodem_receive`, the background reader is stopped for exclusive port access. Logging and `read_buffer` won't capture data during transfers.
+- **Elicitation fallback**: `serial_open` (portless) and `serial_detect_baud` use elicitation when supported. If the host doesn't support it, they return data for the LLM to relay — not an error.
+
 ## Dependencies
 
-Only two: `mcp >= 1.0.0` and `pyserial >= 3.5`.
+Only two runtime deps: `mcp >= 1.0.0` and `pyserial >= 3.5`. Dev: `ruff`, `pytest`, `pytest-asyncio`.
