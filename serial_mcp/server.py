@@ -758,6 +758,107 @@ async def serial_log_stop(session_id: str | None = None) -> dict:
 
 @mcp.tool(
     annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_xmodem_send(
+    file_path: str,
+    session_id: str | None = None,
+    mode: Literal["xmodem", "xmodem-crc"] = "xmodem",
+) -> dict:
+    """Send a file to the device using XMODEM protocol.
+
+    The device must already be waiting to receive (e.g. after a "rx" command
+    or entering a bootloader's receive mode). Supports standard XMODEM
+    (checksum) and XMODEM-CRC (CRC-16) modes.
+
+    Args:
+        file_path: Path to the file to send
+        session_id: Port name of the session. Optional if only one session is open.
+        mode: "xmodem" for checksum mode, "xmodem-crc" for CRC-16 mode
+    """
+    import os
+
+    from serial_mcp.xmodem import xmodem_send
+
+    session = _resolve_session(session_id)
+
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    # Pause reader thread — XMODEM needs exclusive port access
+    session.pause_reader()
+    try:
+        with open(file_path, "rb") as f:
+            result = await asyncio.to_thread(
+                xmodem_send,
+                f,
+                session.raw_read,
+                session.raw_write,
+                mode=mode,
+            )
+    finally:
+        session.resume_reader()
+
+    result["session_id"] = session.port
+    result["file_path"] = file_path
+    return result
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_xmodem_receive(
+    file_path: str,
+    timeout: float = 60.0,
+    session_id: str | None = None,
+    mode: Literal["xmodem", "xmodem-crc"] = "xmodem",
+) -> dict:
+    """Receive a file from the device using XMODEM protocol.
+
+    The device must already be sending (e.g. after a "sx filename" command).
+    The received file is written to file_path.
+
+    Args:
+        file_path: Path where the received file will be saved
+        timeout: Max seconds to wait for transfer to complete
+        session_id: Port name of the session. Optional if only one session is open.
+        mode: "xmodem" for checksum mode, "xmodem-crc" for CRC-16 mode
+    """
+    from serial_mcp.xmodem import xmodem_receive
+
+    session = _resolve_session(session_id)
+
+    # Pause reader thread — XMODEM needs exclusive port access
+    session.pause_reader()
+    try:
+        with open(file_path, "wb") as f:
+            result = await asyncio.to_thread(
+                xmodem_receive,
+                f,
+                session.raw_read,
+                session.raw_write,
+                mode=mode,
+                timeout=timeout,
+            )
+    finally:
+        session.resume_reader()
+
+    result["session_id"] = session.port
+    result["file_path"] = file_path
+    return result
+
+
+@mcp.tool(
+    annotations={
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,

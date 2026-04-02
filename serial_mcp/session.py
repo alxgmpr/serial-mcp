@@ -405,6 +405,34 @@ class SerialSession:
             self._log_bytes = 0
             return result
 
+    # ── Reader control ──────────────────────────────────────────────
+
+    def pause_reader(self) -> None:
+        """Pause the background reader thread. Used during XMODEM transfers."""
+        self._stop_event.set()
+        self._data_event.set()
+        self._reader_thread.join(timeout=2.0)
+
+    def resume_reader(self) -> None:
+        """Resume the background reader thread after a pause."""
+        self._stop_event.clear()
+        self._data_event.clear()
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread.start()
+
+    def raw_read(self, size: int, timeout: float = 1.0) -> bytes:
+        """Read bytes directly from the serial port (bypassing the reader thread).
+
+        Used during XMODEM transfers when the reader thread is paused.
+        """
+        self._serial.timeout = timeout
+        data = self._serial.read(size)
+        return data
+
+    def raw_write(self, data: bytes) -> int:
+        """Write bytes directly to the serial port."""
+        return self._serial.write(data)
+
     # ── Properties ───────────────────────────────────────────────────
 
     @property
