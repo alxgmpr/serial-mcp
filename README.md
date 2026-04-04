@@ -2,6 +2,9 @@
 
 MCP server for serial port communication. Lets LLMs talk to hardware — microcontrollers, routers, modems, embedded Linux, anything with a UART.
 
+<img width="1456" height="1132" alt="image" src="https://github.com/user-attachments/assets/17e948ae-4888-4748-8694-77c1e257e329" />
+
+
 ## What it does
 
 Exposes serial ports as MCP tools so an AI assistant can:
