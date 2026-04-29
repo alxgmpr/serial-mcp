@@ -55,7 +55,9 @@ git push v0.5.0
 
 ### Job: verify
 
-Reads `version` from `pyproject.toml` and compares to `${{ github.ref_name }}` minus the leading `v`. Fails with a clear message on mismatch. Inline Python script using `tomllib` (stdlib in 3.11+; runner has 3.12).
+Reads `version` from both `pyproject.toml` and `manifest.json` (the MCPB manifest carries its own version field) and compares both to `${{ github.ref_name }}` minus the leading `v`. Fails with a clear message listing every mismatch. Inline Python script using `tomllib` (stdlib in 3.11+; runner uses 3.12).
+
+Three places hold the version: tag, `pyproject.toml`, `manifest.json`. The verify job is the gate that ensures all three agree before any artifact is built or published. The release procedure documents updating both files in lockstep.
 
 ### Job: test
 
@@ -97,7 +99,7 @@ These steps are documented in `RELEASING.md` (see below) so they can be replayed
 
 ## Release procedure (post-setup)
 
-1. Edit `version` in `pyproject.toml` (e.g. `0.4.0` → `0.5.0`)
+1. Bump `version` in **both** `pyproject.toml` and `manifest.json` (e.g. `0.4.0` → `0.5.0`)
 2. Commit on `main` (directly or via PR)
 3. `git tag v0.5.0 && git push origin v0.5.0`
 4. Watch the Actions tab; approve the `pypi` deployment when prompted

@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  verify:
+    name: Verify tag matches version files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check tag agrees with pyproject.toml and manifest.json
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, tomllib
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not tag.startswith("v"):
+              sys.exit(f"tag {tag!r} must start with 'v'")
+          tag_version = tag[1:]
+          with open("pyproject.toml", "rb") as f:
+              pyproject_version = tomllib.load(f)["project"]["version"]
+          with open("manifest.json") as f:
+              manifest_version = json.load(f)["version"]
+          mismatches = []
+          if pyproject_version != tag_version:
+              mismatches.append(f"pyproject.toml has {pyproject_version}")
+          if manifest_version != tag_version:
+              mismatches.append(f"manifest.json has {manifest_version}")
+          if mismatches:
+              sys.exit(f"Version mismatch — tag is v{tag_version}; " + "; ".join(mismatches))
+          print(f"OK: tag, pyproject.toml, and manifest.json all agree on {tag_version}")
+          PY
+
+  lint:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check serial_mcp/ tests/
+      - run: ruff format --check serial_mcp/ tests/
+
+  test:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -v
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+      - name: Build MCPB bundle
+        run: bash scripts/build-mcpb.sh
+      - name: Stage MCPB artifact
+        run: |
+          mkdir -p artifacts
+          cp build/mcpb/*.mcpb artifacts/
+          ls -la artifacts/ dist/
+      - name: Upload Python distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+      - name: Upload MCPB
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcpb
+          path: artifacts/*.mcpb
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/serial-mcp
+    permissions:
+      id-token: write
+    steps:
+      - name: Download Python distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download MCPB
+        uses: actions/download-artifact@v4
+        with:
+          name: mcpb
+          path: artifacts/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*.mcpb

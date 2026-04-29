@@ -66,3 +66,7 @@ Run: `pytest -v` (requires dev dependencies: `uv pip install -e ".[dev]"`)
 ## Dependencies
 
 Only two runtime deps: `mcp >= 1.0.0` and `pyserial >= 3.5`. Dev: `ruff`, `pytest`, `pytest-asyncio`.
+
+## Releasing
+
+Releases are automated by `.github/workflows/release.yml` on tag push (`v*.*.*`). To cut a release: bump `version` in **both** `pyproject.toml` and `manifest.json`, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow verifies the tag matches both files, runs lint + tests, builds sdist/wheel/`.mcpb`, publishes to PyPI via Trusted Publishing (gated by a manual approval), and creates a GitHub Release with the `.mcpb` attached. See [RELEASING.md](RELEASING.md) for full procedure and recovery steps.
