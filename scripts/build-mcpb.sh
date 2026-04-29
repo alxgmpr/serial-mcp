@@ -25,5 +25,12 @@ echo "==> Packing MCPB"
 cd "$BUILD_DIR"
 npx @anthropic-ai/mcpb pack
 
+NAME=$(python3 -c "import json; print(json.load(open('manifest.json'))['name'])")
+VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")
+TARGET="${NAME}-${VERSION}.mcpb"
+if [ -f "$BUILD_DIR/mcpb.mcpb" ] && [ "$TARGET" != "mcpb.mcpb" ]; then
+    mv "$BUILD_DIR/mcpb.mcpb" "$BUILD_DIR/$TARGET"
+fi
+
 echo "==> Done. Bundle is in $BUILD_DIR/"
 ls -la "$BUILD_DIR"/*.mcpb 2>/dev/null || echo "(no .mcpb file found — check mcpb pack output)"
