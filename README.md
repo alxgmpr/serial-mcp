@@ -15,6 +15,8 @@ Exposes serial ports as MCP tools so an AI assistant can:
 - **Read/write raw hex** for binary protocols (Modbus, bootloader commands, etc.)
 - **Control hardware signals** (DTR/RTS) — reset Arduinos, enter ESP32 bootloader mode
 - **Auto-detect baud rate** by trying common rates and scoring readability
+- **Transfer files** with XMODEM (checksum or CRC-16)
+- **Log received data** to a file for capture / postmortem analysis
 - **Manage multiple sessions** simultaneously across different ports
 
 ## Install
@@ -140,6 +142,32 @@ All tools are prefixed with `serial_` to avoid name collisions with other MCP se
 |---|---|
 | `serial_clear_history` | Flush the receive buffer and free memory |
 
+### Logging
+
+| Tool | Description |
+|---|---|
+| `serial_log_start` | Capture all received data to a file (like minicom's capture) |
+| `serial_log_stop` | Stop logging and return file path, byte count, and duration |
+
+### File transfer
+
+| Tool | Description |
+|---|---|
+| `serial_xmodem_send` | Send a file via XMODEM (checksum or CRC-16 mode) |
+| `serial_xmodem_receive` | Receive a file via XMODEM (checksum or CRC-16 mode) |
+
+The reader thread is paused for the duration of an XMODEM transfer so the protocol has exclusive port access — `serial_read` and logging won't capture anything during the transfer.
+
+## Prompts
+
+Three prompts are registered to guide common workflows:
+
+| Prompt | Description |
+|---|---|
+| `scan_devices` | Walk through identifying all connected serial devices by VID/PID |
+| `detect_baud_rate` | Run baud detection on a port and interpret the results |
+| `interactive_shell` | Open a connection and probe for the device prompt |
+
 ## Usage examples
 
 ### Interactive shell on a Linux device
@@ -199,6 +227,15 @@ Each `serial_open()` call creates a `SerialSession` with a background thread tha
 All tools are async. Blocking serial I/O runs in `asyncio.to_thread()` so the event loop stays free.
 
 ## Testing
+
+Run the unit tests (no hardware required — they use a `MockSerial` fixture):
+
+```sh
+uv pip install -e ".[dev]"
+pytest -v
+```
+
+Smoke-test the live server with the MCP Inspector:
 
 ```sh
 DANGEROUSLY_OMIT_AUTH=true npx @modelcontextprotocol/inspector -- python3 -m serial_mcp.server
