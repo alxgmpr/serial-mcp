@@ -2,11 +2,20 @@
 
 MCP server for serial port communication. Lets LLMs talk to hardware — microcontrollers, routers, modems, embedded Linux, anything with a UART.
 
-Why use this and not any of the many others out there?
+## Why use this?
 
-1. Real useful tools that the LLM can use like waiting/expecting data.
-2. Better test suite, and I test the commands myself.
-3. I actually use this day to day for real hardware hacking.
+There are a handful of serial MCP servers out there. Most of them stop at `open / read / write / close` — fine for "send a string, get a string," but it falls apart the moment you need to drive a shell prompt, wait for a microcontroller to finish booting, or push firmware over XMODEM.
+
+This one is built for the messy parts:
+
+1. **Expect/wait, not just read.** `serial_command` writes and waits for a regex (or 300 ms of silence). `serial_wait_for` blocks until a pattern appears. That's the difference between scripting an interactive shell and racing the device's output buffer.
+2. **Nothing is lost between tool calls.** A background reader thread captures everything into a timestamped ring buffer the moment a port opens. The LLM can replay history with `serial_read_since` instead of guessing when to call `read`.
+3. **Real hardware control.** DTR/RTS, break signals, and XMODEM file transfer — the primitives you actually need to reset Arduinos, enter ESP32 bootloader mode, interrupt U-Boot, or push firmware to a board with no network.
+4. **Every tool is annotated.** `readOnlyHint`, `destructiveHint`, `idempotentHint` on each registration — the host model knows which calls are safe to retry or parallelize, instead of treating every tool as opaque.
+5. **Interactive elicitation.** When the host supports it (Claude Desktop does), `serial_open` and `serial_detect_baud` prompt the user to pick a port or confirm a baud rate — no remembering `/dev/ttyUSB0` or guessing rates. When the host doesn't, they degrade gracefully and hand the data back to the LLM to relay.
+6. **Drop-in install, no toolchain required.** `uv tool install serial-mcp`, `pip install serial-mcp`, or `uvx serial-mcp` from PyPI; there's also a packaged MCPB for one-click Claude Desktop install. The leading Rust alternative wants you to `git clone && cargo build --release` against a working Rust 1.70+ toolchain.
+7. **27 mocked unit tests, no hardware required for CI.** A `MockSerial` fixture covers session buffering, pattern matching, history trimming, logging, and XMODEM. I also smoke-test against real devices before tagging a release.
+8. **I use this day-to-day** for actual hardware hacking. The 22 tools exist because I needed them, not because they round out a feature matrix.
 
 <img width="1456" height="1132" alt="image" src="https://github.com/user-attachments/assets/17e948ae-4888-4748-8694-77c1e257e329" />
 
