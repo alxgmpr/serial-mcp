@@ -2,6 +2,12 @@
 
 MCP server for serial port communication. Lets LLMs talk to hardware — microcontrollers, routers, modems, embedded Linux, anything with a UART.
 
+Why use this and not any of the many others out there?
+
+1. Real useful tools that the LLM can use like waiting/expecting data.
+2. Better test suite, and I test the commands myself.
+3. I actually use this day to day for real hardware hacking.
+
 <img width="1456" height="1132" alt="image" src="https://github.com/user-attachments/assets/17e948ae-4888-4748-8694-77c1e257e329" />
 
 
