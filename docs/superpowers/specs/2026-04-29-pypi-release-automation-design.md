@@ -88,9 +88,10 @@ All three uploaded via `actions/upload-artifact@v4`. Subsequent jobs download wh
 
 ## Manual setup (one-time, by repo owner)
 
-1. **PyPI Trusted Publisher** — at https://pypi.org/manage/project/serial-mcp/settings/publishing/, add a Trusted Publisher with:
+1. **PyPI Trusted Publisher** — the existing `serial-mcp` project on PyPI is owned by another user, so we publish under the new distribution name `pyserial-mcp`. First release uses the pending-publisher flow at https://pypi.org/manage/account/publishing/ with:
+   - PyPI Project Name: `pyserial-mcp`
    - Owner: `alxgmpr`
-   - Repository name: `serial-mcp`
+   - Repository name: `serial-mcp` (the GitHub repo keeps its name)
    - Workflow filename: `release.yml`
    - Environment name: `pypi`
 2. **GitHub Environment** — in repo Settings → Environments, create `pypi` and enable "Required reviewers" with the repo owner as reviewer. This adds an explicit approval click between the `build` and `publish-pypi` jobs.

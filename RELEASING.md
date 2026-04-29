@@ -12,14 +12,19 @@ These steps must be completed by a maintainer before the first automated release
 
 ### 1. PyPI Trusted Publisher
 
-Go to https://pypi.org/manage/project/serial-mcp/settings/publishing/ and add a Trusted Publisher with:
+The PyPI distribution name is `pyserial-mcp` (the `serial-mcp` name is owned by another user). The GitHub repo, CLI command (`serial-mcp`), Python import (`serial_mcp`), and MCPB bundle name remain unchanged.
+
+The first release of `pyserial-mcp` won't have a project page yet, so use the **pending publisher** flow at https://pypi.org/manage/account/publishing/ with these values:
 
 | Field               | Value             |
 | ------------------- | ----------------- |
+| PyPI Project Name   | `pyserial-mcp`    |
 | Owner               | `alxgmpr`         |
 | Repository name     | `serial-mcp`      |
 | Workflow filename   | `release.yml`     |
 | Environment name    | `pypi`            |
+
+After the first successful publish, future Trusted Publisher edits live at https://pypi.org/manage/project/pyserial-mcp/settings/publishing/.
 
 ### 2. GitHub Environment
 

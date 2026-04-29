@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/serial-mcp
+      url: https://pypi.org/p/pyserial-mcp
     permissions:
       id-token: write
     steps:

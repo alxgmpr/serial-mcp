@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "serial-mcp"
+name = "pyserial-mcp"
 version = "0.4.0"
 description = "MCP server for serial device communication"
 readme = "README.md"
