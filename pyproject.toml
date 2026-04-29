@@ -45,6 +45,9 @@ dev = [
     "pytest-asyncio>=0.23.0",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["serial_mcp"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 120
