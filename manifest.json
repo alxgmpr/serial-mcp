@@ -18,7 +18,10 @@
     "runtimes": { "python": ">=3.10" }
   },
   "homepage": "https://github.com/alxgmpr/serial-mcp",
-  "repository": "https://github.com/alxgmpr/serial-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alxgmpr/serial-mcp"
+  },
   "license": "MIT",
   "keywords": ["serial", "uart", "embedded", "iot", "pyserial", "xmodem"]
 }
