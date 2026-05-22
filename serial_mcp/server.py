@@ -1,6 +1,11 @@
 import asyncio
 import atexit
+import logging
+import os
+import signal
+import subprocess
 import time
+from contextlib import asynccontextmanager
 from typing import Literal
 
 import serial
@@ -9,9 +14,14 @@ from serial.tools import list_ports
 
 from serial_mcp.session import SerialSession
 
-mcp = FastMCP("serial_mcp")
+_DEFAULT_INACTIVITY_TIMEOUT = 900  # 15 minutes
+_REAPER_INTERVAL = 30
 
 _sessions: dict[str, SerialSession] = {}
+_session_timeouts: dict[str, float] = {}
+_auto_closed_sessions: dict[str, str] = {}
+
+logger = logging.getLogger("serial_mcp")
 
 
 def _cleanup_sessions():
@@ -19,16 +29,111 @@ def _cleanup_sessions():
     for session in list(_sessions.values()):
         session.close()
     _sessions.clear()
+    _session_timeouts.clear()
 
 
 atexit.register(_cleanup_sessions)
 
 
+async def _session_reaper():
+    """Background task that closes sessions after inactivity."""
+    while True:
+        await asyncio.sleep(_REAPER_INTERVAL)
+        stale_ports = []
+        for port, session in list(_sessions.items()):
+            timeout = _session_timeouts.get(port, _DEFAULT_INACTIVITY_TIMEOUT)
+            if session.inactivity_seconds > timeout:
+                stale_ports.append(port)
+
+        for port in stale_ports:
+            session = _sessions.pop(port, None)
+            timeout = _session_timeouts.pop(port, _DEFAULT_INACTIVITY_TIMEOUT)
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                msg = f"Session on {port} was automatically closed after {int(timeout // 60)} minutes of inactivity."
+                _auto_closed_sessions[port] = msg
+                logger.info(msg)
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    reaper_task = asyncio.create_task(_session_reaper())
+    try:
+        yield {}
+    finally:
+        reaper_task.cancel()
+        try:
+            await reaper_task
+        except asyncio.CancelledError:
+            pass
+
+
+mcp = FastMCP(
+    "serial_mcp",
+    instructions=(
+        "IMPORTANT: Always call serial_close() when you are done using a serial port. "
+        "Leaving ports open blocks other tools and processes from accessing the device. "
+        "If your task is complete or you encounter an unrecoverable error, close the port immediately. "
+        "Never hold a port open between interactions."
+    ),
+    lifespan=_lifespan,
+)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _normalize_output(data: str) -> str:
+    """Normalize serial output for AI consumption."""
+    data = data.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in data.split("\n")]
+    return "\n".join(lines).rstrip()
+
+
+def _get_process_holding_port(port: str) -> dict | None:
+    """Find the process holding a serial port using lsof."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-t", port],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        pid = int(result.stdout.strip().split()[0])
+        ps_result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "pid=,user=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if ps_result.returncode == 0 and ps_result.stdout.strip():
+            parts = ps_result.stdout.strip().split(None, 2)
+            return {
+                "pid": int(parts[0]),
+                "user": parts[1] if len(parts) > 1 else "unknown",
+                "command": parts[2] if len(parts) > 2 else "unknown",
+            }
+        return {"pid": pid, "user": "unknown", "command": "unknown"}
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
 
 
 def _resolve_session(session_id: str | None = None) -> SerialSession:
     """Resolve a session by ID, or auto-select when only one is open."""
+    if session_id is not None and session_id in _auto_closed_sessions:
+        msg = _auto_closed_sessions.pop(session_id)
+        raise RuntimeError(msg + " Reopen with serial_open() if needed.")
+
+    if session_id is None and _auto_closed_sessions:
+        msgs = list(_auto_closed_sessions.values())
+        _auto_closed_sessions.clear()
+        raise RuntimeError(" ".join(msgs) + " Reopen with serial_open() if needed.")
+
     if session_id is not None:
         if session_id not in _sessions:
             available = list(_sessions.keys()) or "none"
@@ -88,6 +193,104 @@ async def list_serial_ports() -> list[dict]:
     return results
 
 
+# ── Port control ────────────────────────────────────────────────────
+
+
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_force_release(port: str) -> dict:
+    """Kill the process holding a serial port so it can be opened.
+
+    Uses lsof to find the process holding the port, then sends SIGTERM
+    (escalating to SIGKILL if needed). This is a destructive operation —
+    it will terminate the process holding the port.
+
+    Args:
+        port: Serial port device path (e.g. /dev/ttyUSB0, /dev/cu.usbserial-1420)
+    """
+    proc = await asyncio.to_thread(_get_process_holding_port, port)
+    if proc is None:
+        return {
+            "port": port,
+            "released": False,
+            "message": f"No process found holding {port}. The port may be free.",
+        }
+
+    pid = proc["pid"]
+    command = proc["command"]
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return {
+            "port": port,
+            "released": True,
+            "pid": pid,
+            "command": command,
+            "message": f"Process {pid} ({command}) already exited.",
+        }
+    except PermissionError:
+        return {
+            "port": port,
+            "released": False,
+            "pid": pid,
+            "command": command,
+            "message": f"Permission denied killing PID {pid} ({command}). May need sudo.",
+        }
+
+    await asyncio.sleep(1.0)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return {
+            "port": port,
+            "released": True,
+            "pid": pid,
+            "command": command,
+            "signal": "SIGTERM",
+            "message": f"Killed PID {pid} ({command}) with SIGTERM. Port {port} should now be free.",
+        }
+
+    # Still alive — escalate
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+    await asyncio.sleep(0.5)
+
+    try:
+        os.kill(pid, 0)
+        still_alive = True
+    except ProcessLookupError:
+        still_alive = False
+
+    if still_alive:
+        return {
+            "port": port,
+            "released": False,
+            "pid": pid,
+            "command": command,
+            "message": f"Failed to kill PID {pid} ({command}). Process may require sudo to terminate.",
+        }
+
+    return {
+        "port": port,
+        "released": True,
+        "pid": pid,
+        "command": command,
+        "signal": "SIGKILL",
+        "message": f"Killed PID {pid} ({command}) with SIGKILL. Port {port} should now be free.",
+    }
+
+
 # ── Connection management ────────────────────────────────────────────
 
 
@@ -107,12 +310,18 @@ async def serial_open(
     stop_bits: float = 1,
     parity: Literal["none", "even", "odd", "mark", "space"] = "none",
     timeout: float = 1.0,
+    inactivity_timeout: float = 900,
 ) -> dict:
     """Open a serial connection to the specified port.
 
     If port is omitted, automatically discovers available ports. When only one
     port is found it is used directly; when multiple are found, elicitation is
     used to let the user pick one.
+
+    IMPORTANT: Always call serial_close() when you are finished with the port.
+    Leaving a port open prevents other processes from accessing the device.
+    The session will be automatically closed after inactivity_timeout seconds
+    of no activity.
 
     Common configurations:
     - Most devices: 115200 baud, 8N1 (the defaults)
@@ -126,6 +335,7 @@ async def serial_open(
         stop_bits: Number of stop bits (1, 1.5, or 2)
         parity: Parity checking ("none", "even", "odd", "mark", "space")
         timeout: Read timeout in seconds
+        inactivity_timeout: Seconds of inactivity before the session is auto-closed (default 900 = 15 min)
     """
     # If no port specified, try to elicit a choice
     if port is None:
@@ -160,21 +370,42 @@ async def serial_open(
     if stop_bits not in (1, 1.5, 2):
         raise ValueError(f"Invalid stop_bits: {stop_bits}. Must be 1, 1.5, or 2.")
 
-    session = await asyncio.to_thread(
-        SerialSession,
-        port=port,
-        baud_rate=baud_rate,
-        data_bits=data_bits,
-        stop_bits=stop_bits,
-        parity=parity,
-        timeout=timeout,
-    )
+    try:
+        session = await asyncio.to_thread(
+            SerialSession,
+            port=port,
+            baud_rate=baud_rate,
+            data_bits=data_bits,
+            stop_bits=stop_bits,
+            parity=parity,
+            timeout=timeout,
+        )
+    except (serial.SerialException, PermissionError, OSError) as e:
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ("busy", "permission", "access", "locked", "in use")):
+            proc = _get_process_holding_port(port)
+            if proc:
+                raise RuntimeError(
+                    f"Port {port} is in use by PID {proc['pid']} ({proc['command']}). "
+                    f'Close that process or use serial_force_release(port="{port}") to kill it.'
+                ) from e
+            raise RuntimeError(
+                f"Port {port} is in use by another process. "
+                f"Close any other serial terminals (minicom, screen, picocom, cu, PuTTY, etc.) "
+                f'or use serial_force_release(port="{port}") to kill the holder.'
+            ) from e
+        raise RuntimeError(
+            f"Could not open port {port}: {e}. Check that the device is connected and the port path is correct."
+        ) from e
+
     _sessions[port] = session
+    _session_timeouts[port] = inactivity_timeout
 
     return {
         "session_id": port,
-        "message": (f"Connected to {port} at {baud_rate} baud ({data_bits}{parity[0].upper()}{stop_bits})"),
+        "message": f"Connected to {port} at {baud_rate} baud ({data_bits}{parity[0].upper()}{stop_bits})",
         "connected_at": session.connected_at,
+        "inactivity_timeout": inactivity_timeout,
     }
 
 
@@ -187,7 +418,10 @@ async def serial_open(
     }
 )
 async def serial_close(session_id: str | None = None) -> str:
-    """Close a serial connection.
+    """Close a serial connection and release the port.
+
+    Always call this when you are done interacting with a device. Leaving a port
+    open blocks other tools and processes from accessing the device.
 
     Args:
         session_id: Port name of the session to close. Optional if only one session is open.
@@ -196,6 +430,7 @@ async def serial_close(session_id: str | None = None) -> str:
     port = session.port
     await asyncio.to_thread(session.close)
     del _sessions[port]
+    _session_timeouts.pop(port, None)
     return f"Closed connection to {port}."
 
 
@@ -302,6 +537,10 @@ async def serial_command(
 
     raw = data.encode(encoding)
     result = await asyncio.to_thread(session.command, raw, expect=expect, timeout=timeout, encoding=encoding)
+    if "data" in result:
+        result["data"] = _normalize_output(result["data"])
+    if "matched" in result and result["matched"] is not None:
+        result["matched"] = _normalize_output(result["matched"])
     result["session_id"] = session.port
     return result
 
@@ -341,6 +580,10 @@ async def serial_wait_for(
     """
     session = _resolve_session(session_id)
     result = await asyncio.to_thread(session.wait_for, pattern=pattern, timeout=timeout, encoding=encoding)
+    if "data" in result:
+        result["data"] = _normalize_output(result["data"])
+    if "matched" in result and result["matched"] is not None:
+        result["matched"] = _normalize_output(result["matched"])
     result["session_id"] = session.port
     return result
 
@@ -412,6 +655,8 @@ async def serial_read(
     """
     session = _resolve_session(session_id)
     result = await asyncio.to_thread(session.read_buffer, timeout=timeout, encoding=encoding)
+    if "data" in result:
+        result["data"] = _normalize_output(result["data"])
     result["session_id"] = session.port
     return result
 
@@ -442,6 +687,8 @@ async def serial_read_since(
     """
     session = _resolve_session(session_id)
     result = session.read_since(since=since, encoding=encoding)
+    if "data" in result:
+        result["data"] = _normalize_output(result["data"])
     result["session_id"] = session.port
     result["connected_at"] = session.connected_at
     return result
@@ -920,18 +1167,23 @@ async def serial_xmodem_receive(
 )
 async def serial_list_sessions() -> dict:
     """List all open serial sessions with connection details."""
-    return {
-        "session_count": len(_sessions),
-        "sessions": [
+    sessions_list = []
+    for s in _sessions.values():
+        timeout = _session_timeouts.get(s.port, _DEFAULT_INACTIVITY_TIMEOUT)
+        sessions_list.append(
             {
                 "session_id": s.port,
                 "baud_rate": s.baud_rate,
                 "healthy": s.is_healthy,
                 "uptime_seconds": round(s.uptime, 1),
                 "connected_at": s.connected_at,
+                "idle_seconds": round(s.inactivity_seconds, 1),
+                "auto_close_in": max(0, round(timeout - s.inactivity_seconds, 1)),
             }
-            for s in _sessions.values()
-        ],
+        )
+    return {
+        "session_count": len(_sessions),
+        "sessions": sessions_list,
     }
 
 
@@ -963,10 +1215,10 @@ async def serial_status(session_id: str | None = None) -> dict:
 
     # If multiple sessions and no session_id, return summary of all
     if session_id is None and len(_sessions) > 1:
-        return {
-            "connected": True,
-            "session_count": len(_sessions),
-            "sessions": [
+        summary = []
+        for s in _sessions.values():
+            t = _session_timeouts.get(s.port, _DEFAULT_INACTIVITY_TIMEOUT)
+            summary.append(
                 {
                     "session_id": s.port,
                     "baud_rate": s.baud_rate,
@@ -975,13 +1227,19 @@ async def serial_status(session_id: str | None = None) -> dict:
                     "total_bytes_received": s.total_bytes_received,
                     "uptime_seconds": round(s.uptime, 1),
                     "connected_at": s.connected_at,
+                    "idle_seconds": round(s.inactivity_seconds, 1),
+                    "auto_close_in": max(0, round(t - s.inactivity_seconds, 1)),
                 }
-                for s in _sessions.values()
-            ],
+            )
+        return {
+            "connected": True,
+            "session_count": len(_sessions),
+            "sessions": summary,
         }
 
     session = _resolve_session(session_id)
     health = session.health_status
+    t = _session_timeouts.get(session.port, _DEFAULT_INACTIVITY_TIMEOUT)
     return {
         "connected": True,
         "session_id": session.port,
@@ -996,6 +1254,8 @@ async def serial_status(session_id: str | None = None) -> dict:
         "total_bytes_received": session.total_bytes_received,
         "uptime_seconds": round(session.uptime, 1),
         "connected_at": session.connected_at,
+        "idle_seconds": round(session.inactivity_seconds, 1),
+        "auto_close_in": max(0, round(t - session.inactivity_seconds, 1)),
     }
 
 
@@ -1040,7 +1300,22 @@ def interactive_shell(port: str, baud_rate: int = 115200) -> str:
         "3. Examine the response to identify the device and its prompt\n"
         "4. You are now ready to send commands. Use serial_command() with the "
         "expect parameter set to the device's prompt pattern for reliable "
-        "interaction."
+        "interaction.\n"
+        "5. When you are finished, ALWAYS call serial_close() to release the port."
+    )
+
+
+@mcp.prompt()
+def safe_session(port: str, baud_rate: int = 115200) -> str:
+    """Open a serial session with a reminder to close it when done."""
+    return (
+        f"Open a serial session on {port} at {baud_rate} baud and interact with the device.\n"
+        f'1. Call serial_open(port="{port}", baud_rate={baud_rate})\n'
+        "2. Perform your task using serial_command() or other serial tools\n"
+        "3. When COMPLETELY DONE — even if an error occurred — call serial_close() to release the port\n"
+        "\n"
+        "CRITICAL: You MUST call serial_close() before finishing. Failure to close the port "
+        "will prevent other processes from accessing the device."
     )
 
 

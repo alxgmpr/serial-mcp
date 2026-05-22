@@ -1,14 +1,24 @@
 import pytest
 
-from serial_mcp.server import _resolve_session, _sessions
+from serial_mcp.server import (
+    _auto_closed_sessions,
+    _normalize_output,
+    _resolve_session,
+    _session_timeouts,
+    _sessions,
+)
 
 
 @pytest.fixture(autouse=True)
 def clear_sessions():
     """Ensure sessions dict is empty before/after each test."""
     _sessions.clear()
+    _session_timeouts.clear()
+    _auto_closed_sessions.clear()
     yield
     _sessions.clear()
+    _session_timeouts.clear()
+    _auto_closed_sessions.clear()
 
 
 def test_resolve_session_no_sessions():
@@ -61,3 +71,117 @@ def test_resolve_session_invalid_id():
     """Should raise for an unknown session ID."""
     with pytest.raises(RuntimeError, match="No session open"):
         _resolve_session("/dev/ttyNONE")
+
+
+# ── Output normalization tests ─────────────────────────────────────
+
+
+def test_normalize_output_crlf():
+    assert _normalize_output("hello\r\nworld\r\n") == "hello\nworld"
+
+
+def test_normalize_output_cr():
+    assert _normalize_output("hello\rworld\r") == "hello\nworld"
+
+
+def test_normalize_output_mixed():
+    assert _normalize_output("line1\r\nline2\rline3\n") == "line1\nline2\nline3"
+
+
+def test_normalize_output_trailing_whitespace():
+    assert _normalize_output("hello   \r\nworld  \r\n") == "hello\nworld"
+
+
+def test_normalize_output_empty():
+    assert _normalize_output("") == ""
+
+
+def test_normalize_output_no_change():
+    assert _normalize_output("clean output") == "clean output"
+
+
+# ── Auto-close notification tests ──────────────────────────────────
+
+
+def test_resolve_session_auto_closed_by_id():
+    """Should raise with auto-close message for a specific session."""
+    _auto_closed_sessions["/dev/ttyTEST"] = "Session on /dev/ttyTEST was automatically closed after 15 minutes."
+    with pytest.raises(RuntimeError, match="automatically closed"):
+        _resolve_session("/dev/ttyTEST")
+    assert "/dev/ttyTEST" not in _auto_closed_sessions
+
+
+def test_resolve_session_auto_closed_any():
+    """Should raise with auto-close message when no session_id specified."""
+    _auto_closed_sessions["/dev/ttyTEST"] = "Session on /dev/ttyTEST was automatically closed after 15 minutes."
+    with pytest.raises(RuntimeError, match="automatically closed"):
+        _resolve_session()
+    assert len(_auto_closed_sessions) == 0
+
+
+# ── Port-busy error tests ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_serial_open_port_busy(monkeypatch):
+    """Should raise clear error when port is busy."""
+    import serial
+
+    from serial_mcp.server import serial_open
+
+    monkeypatch.setattr(
+        "serial_mcp.server.SerialSession",
+        lambda **kw: (_ for _ in ()).throw(serial.SerialException("could not open port: [Errno 16] Resource busy")),
+    )
+    monkeypatch.setattr("serial_mcp.server._get_process_holding_port", lambda p: None)
+
+    class FakeCtx:
+        async def elicit(self, *a, **kw):
+            raise NotImplementedError
+
+    with pytest.raises(RuntimeError, match="in use by another process"):
+        await serial_open(FakeCtx(), port="/dev/ttyBUSY")
+
+
+@pytest.mark.asyncio
+async def test_serial_open_port_busy_with_pid(monkeypatch):
+    """Should include PID and command when process is identified."""
+    import serial
+
+    from serial_mcp.server import serial_open
+
+    monkeypatch.setattr(
+        "serial_mcp.server.SerialSession",
+        lambda **kw: (_ for _ in ()).throw(serial.SerialException("could not open port: Permission denied")),
+    )
+    monkeypatch.setattr(
+        "serial_mcp.server._get_process_holding_port",
+        lambda p: {"pid": 1234, "user": "root", "command": "minicom"},
+    )
+
+    class FakeCtx:
+        async def elicit(self, *a, **kw):
+            raise NotImplementedError
+
+    with pytest.raises(RuntimeError, match="PID 1234.*minicom"):
+        await serial_open(FakeCtx(), port="/dev/ttyBUSY")
+
+
+@pytest.mark.asyncio
+async def test_serial_open_generic_error(monkeypatch):
+    """Non-busy serial errors should get a helpful message."""
+    import serial
+
+    from serial_mcp.server import serial_open
+
+    monkeypatch.setattr(
+        "serial_mcp.server.SerialSession",
+        lambda **kw: (_ for _ in ()).throw(serial.SerialException("port not found")),
+    )
+
+    class FakeCtx:
+        async def elicit(self, *a, **kw):
+            raise NotImplementedError
+
+    with pytest.raises(RuntimeError, match="Could not open port.*port not found"):
+        await serial_open(FakeCtx(), port="/dev/ttyNONE")

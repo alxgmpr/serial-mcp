@@ -214,3 +214,77 @@ def test_close_clears_state(mock_serial):
     time.sleep(0.05)
     session.close()
     assert mock_serial.is_open is False
+
+
+# ── Activity tracking tests ─────────────────────────────────────────
+
+
+def test_activity_tracking_init(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        assert session.last_activity > 0
+        assert session.inactivity_seconds < 1.0
+    finally:
+        session.close()
+
+
+def test_activity_tracking_write(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        initial = session.last_activity
+        time.sleep(0.05)
+        session.write(b"test")
+        assert session.last_activity > initial
+    finally:
+        session.close()
+
+
+def test_activity_tracking_read(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        initial = session.last_activity
+        time.sleep(0.05)
+        session.read_buffer(timeout=0.01)
+        assert session.last_activity > initial
+    finally:
+        session.close()
+
+
+def test_activity_tracking_data_receipt(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        initial = session.last_activity
+        time.sleep(0.05)
+        mock_serial.inject_data(b"incoming")
+        time.sleep(0.05)
+        assert session.last_activity > initial
+    finally:
+        session.close()
