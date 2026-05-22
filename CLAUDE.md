@@ -36,7 +36,7 @@ ruff format --check serial_mcp/ tests/
 
 Three-file architecture in `serial_mcp/`:
 
-- **server.py** — FastMCP server exposing ~22 async tools (all prefixed `serial_*`) and 3 prompts. Maintains a global `_sessions` dict keyed by port name with atexit cleanup. `_resolve_session()` auto-selects when only one session is open. All tools include MCP annotations (readOnlyHint, destructiveHint, etc.). Blocking serial I/O is wrapped in `asyncio.to_thread()`. Tools are grouped: port discovery, connection management, text read/write, binary/hex read/write, hardware signal control, session utilities, XMODEM file transfer, and logging. Supports elicitation for interactive port and baud selection.
+- **server.py** — FastMCP server exposing ~23 async tools (all prefixed `serial_*`) and 4 prompts. Maintains a global `_sessions` dict keyed by port name with atexit cleanup. `_resolve_session()` auto-selects when only one session is open and surfaces auto-close notifications. All tools include MCP annotations (readOnlyHint, destructiveHint, etc.). Blocking serial I/O is wrapped in `asyncio.to_thread()`. Tools are grouped: port discovery, port control (`serial_force_release`), connection management, text read/write, binary/hex read/write, hardware signal control, session utilities, XMODEM file transfer, and logging. Supports elicitation for interactive port and baud selection. Server-level instructions tell the AI to always close ports. A background `_session_reaper` task auto-closes idle sessions. Text output is normalized (`\r\n` → `\n`, trailing whitespace stripped) at the tool layer via `_normalize_output()`.
 
 - **session.py** — `SerialSession` class managing individual serial connections. Runs a daemon background reader thread that stores data in a timestamped ring buffer (10MB default cap). Supports both destructive reads (`read_buffer`) and non-destructive historical reads (`read_since`). Thread safety via `threading.Lock` for history and `threading.Event` for data availability and shutdown signaling.
 
@@ -51,10 +51,13 @@ Entry point: `serial_mcp.server:main()` (registered as `serial-mcp` console scri
 - **Hardware signals**: Full DTR/RTS control and CTS/DSR/RI/CD readback for reset sequences and bootloader entry.
 - **Baud detection**: Tries 8 common rates, scores readability by printable ASCII ratio, optional `\r\n` probing.
 - **XMODEM file transfer**: Pure-Python implementation with reader thread pause/resume. Uses callable abstraction for testability.
+- **Output normalization**: `\r\n` → `\n` and trailing whitespace stripped at the tool layer only — session.py stays raw for binary/hex tools.
+- **Inactivity auto-close**: Per-session timeout (default 15 min, configurable via `inactivity_timeout` on `serial_open`). Background reaper task closes stale sessions and records messages for the AI.
+- **Port-busy detection**: `serial_open` catches OS-level port-busy errors, identifies the blocking process via `lsof`, and suggests `serial_force_release()`. The force-release tool kills the holder (SIGTERM → SIGKILL).
 
 ## Testing
 
-27 unit tests using pytest with a `MockSerial` fixture (no real hardware needed). Tests cover session buffer management, pattern matching, history trimming, logging, XMODEM protocol, and server tool resolution.
+42 unit tests using pytest with a `MockSerial` fixture (no real hardware needed). Tests cover session buffer management, pattern matching, history trimming, logging, XMODEM protocol, server tool resolution, output normalization, auto-close notifications, port-busy error handling, and activity tracking.
 
 Run: `pytest -v` (requires dev dependencies: `uv pip install -e ".[dev]"`)
 
@@ -62,6 +65,7 @@ Run: `pytest -v` (requires dev dependencies: `uv pip install -e ".[dev]"`)
 
 - **XMODEM pauses the reader thread**: During `serial_xmodem_send`/`serial_xmodem_receive`, the background reader is stopped for exclusive port access. Logging and `read_buffer` won't capture data during transfers.
 - **Elicitation fallback**: `serial_open` (portless) and `serial_detect_baud` use elicitation when supported. If the host doesn't support it, they return data for the LLM to relay — not an error.
+- **Inactivity auto-close**: Sessions auto-close after their `inactivity_timeout` (default 15 min). The AI sees a clear error message on next tool call. Activity is tracked on every read/write/command and on background data receipt.
 
 ## Dependencies
 

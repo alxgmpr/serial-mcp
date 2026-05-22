@@ -14,7 +14,7 @@ This one is built for the messy parts:
 4. **Every tool is annotated.** `readOnlyHint`, `destructiveHint`, `idempotentHint` on each registration — the host model knows which calls are safe to retry or parallelize, instead of treating every tool as opaque.
 5. **Interactive elicitation.** When the host supports it (Claude Desktop does), `serial_open` and `serial_detect_baud` prompt the user to pick a port or confirm a baud rate — no remembering `/dev/ttyUSB0` or guessing rates. When the host doesn't, they degrade gracefully and hand the data back to the LLM to relay.
 6. **Drop-in install, no toolchain required.** `uv tool install serial-mcp`, `pip install serial-mcp`, or `uvx serial-mcp` from PyPI; there's also a packaged MCPB for one-click Claude Desktop install. The leading Rust alternative wants you to `git clone && cargo build --release` against a working Rust 1.70+ toolchain.
-7. **27 mocked unit tests, no hardware required for CI.** A `MockSerial` fixture covers session buffering, pattern matching, history trimming, logging, and XMODEM. I also smoke-test against real devices before tagging a release.
+7. **42 mocked unit tests, no hardware required for CI.** A `MockSerial` fixture covers session buffering, pattern matching, history trimming, logging, XMODEM, output normalization, and auto-close. I also smoke-test against real devices before tagging a release.
 8. **I use this day-to-day** for actual hardware hacking. The 22 tools exist because I needed them, not because they round out a feature matrix.
 
 <img width="1456" height="1132" alt="image" src="https://github.com/user-attachments/assets/17e948ae-4888-4748-8694-77c1e257e329" />
@@ -116,12 +116,18 @@ All tools are prefixed with `serial_` to avoid name collisions with other MCP se
 | `list_serial_ports` | List available serial ports with USB metadata (VID/PID, manufacturer) |
 | `serial_detect_baud` | Auto-detect baud rate by trying common rates and scoring ASCII readability |
 
+### Port control
+
+| Tool | Description |
+|---|---|
+| `serial_force_release` | Kill the process holding a serial port (SIGTERM → SIGKILL) so it can be opened |
+
 ### Connection management
 
 | Tool | Description |
 |---|---|
-| `serial_open` | Open a serial connection (baud, data bits, stop bits, parity, timeout) |
-| `serial_close` | Close a connection |
+| `serial_open` | Open a serial connection with configurable inactivity timeout (default 15 min auto-close) |
+| `serial_close` | Close a connection and release the port |
 | `serial_change_settings` | Change baud/parity/etc. on a live connection without closing it |
 | `serial_list_sessions` | List all open sessions |
 | `serial_status` | Detailed connection health, byte counts, uptime |
@@ -175,13 +181,14 @@ The reader thread is paused for the duration of an XMODEM transfer so the protoc
 
 ## Prompts
 
-Three prompts are registered to guide common workflows:
+Four prompts are registered to guide common workflows:
 
 | Prompt | Description |
 |---|---|
 | `scan_devices` | Walk through identifying all connected serial devices by VID/PID |
 | `detect_baud_rate` | Run baud detection on a port and interpret the results |
 | `interactive_shell` | Open a connection and probe for the device prompt |
+| `safe_session` | Open/use/close lifecycle with mandatory port release reminder |
 
 ## Usage examples
 
@@ -240,6 +247,18 @@ Each `serial_open()` call creates a `SerialSession` with a background thread tha
 - **Multiple sessions** — each port gets its own thread and buffer
 
 All tools are async. Blocking serial I/O runs in `asyncio.to_thread()` so the event loop stays free.
+
+### Session lifecycle
+
+Sessions auto-close after a configurable inactivity timeout (default 15 minutes). The AI can set a custom timeout via `serial_open(inactivity_timeout=...)`. A background reaper task checks every 30 seconds and closes stale sessions, surfacing a clear message when the AI next tries to use them. Server-level instructions, tool docstrings, and prompts all reinforce that ports must be closed when done.
+
+### Output normalization
+
+Serial output is normalized at the tool layer: `\r\n` → `\n`, trailing whitespace stripped per line. Raw bytes are preserved in `session.py` for binary/hex tools — normalization only affects text-returning tools (`serial_command`, `serial_read`, `serial_wait_for`, `serial_read_since`).
+
+### Port conflict handling
+
+When a port is held by another process, `serial_open` identifies the blocker via `lsof` and returns an actionable error with PID and command name. `serial_force_release` can kill the holder (with user approval) so the port can be reclaimed without leaving the AI session.
 
 ## Testing
 
