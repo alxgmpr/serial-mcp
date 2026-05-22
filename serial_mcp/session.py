@@ -46,6 +46,7 @@ class SerialSession:
         self.stop_bits = stop_bits
         self.parity = parity
         self.connected_at = time.time()
+        self._last_activity = time.time()
 
         self._history: list[tuple[float, bytes]] = []
         self._read_cursor: int = 0
@@ -81,9 +82,11 @@ class SerialSession:
                     data = self._serial.read(self._serial.in_waiting)
                     if data:
                         with self._lock:
-                            self._history.append((time.time(), data))
+                            now = time.time()
+                            self._history.append((now, data))
                             self._buffer_bytes += len(data)
                             self._total_bytes_received += len(data)
+                            self._last_activity = now
                             self._trim_history()
                         self._data_event.set()
                         # Log to file if active
@@ -128,6 +131,7 @@ class SerialSession:
 
         If no new data is available, waits up to timeout seconds for data to arrive.
         """
+        self._last_activity = time.time()
         with self._lock:
             has_data = self._read_cursor < len(self._history)
 
@@ -173,6 +177,7 @@ class SerialSession:
             since: Unix timestamp. If None, returns all data since session start.
             encoding: Character encoding for decoding.
         """
+        self._last_activity = time.time()
         with self._lock:
             if since is None:
                 chunks = list(self._history)
@@ -213,6 +218,7 @@ class SerialSession:
         If `expect` is a regex pattern, waits until it matches in the response.
         Otherwise waits until the device stops sending (settle_time of silence).
         """
+        self._last_activity = time.time()
         with self._lock:
             start_cursor = len(self._history)
 
@@ -255,6 +261,7 @@ class SerialSession:
 
     def wait_for(self, pattern: str, timeout: float = 10.0, encoding: str = "utf-8") -> dict:
         """Wait for a regex pattern to appear in incoming data."""
+        self._last_activity = time.time()
         with self._lock:
             start_cursor = len(self._history)
         return self._wait_for_pattern(pattern, timeout, encoding, start_cursor)
@@ -305,6 +312,7 @@ class SerialSession:
 
     def write(self, data: bytes) -> int:
         """Writes bytes to the serial port. Returns number of bytes written."""
+        self._last_activity = time.time()
         return self._serial.write(data)
 
     # ── Hardware signal control ──────────────────────────────────────
@@ -463,6 +471,14 @@ class SerialSession:
         if not self._serial.is_open:
             return {"healthy": False, "reason": "Port closed"}
         return {"healthy": True}
+
+    @property
+    def last_activity(self) -> float:
+        return self._last_activity
+
+    @property
+    def inactivity_seconds(self) -> float:
+        return time.time() - self._last_activity
 
     @property
     def uptime(self) -> float:
