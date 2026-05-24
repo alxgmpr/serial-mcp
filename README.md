@@ -1,27 +1,14 @@
 # serial-mcp
 
-MCP server for serial port communication. Lets LLMs talk to hardware — microcontrollers, routers, modems, embedded Linux, anything with a UART.
+MCP server that lets LLMs talk to serial devices: microcontrollers, routers, modems, embedded Linux, anything with a UART.
 
-## Why use this?
+## Why this exists
 
-Instead of letting your LLM hack together Python scripts to figure out UART or copy-pasting between terminals, this MCP provides a better toolset for AIs interacting with TTL, XMODEM and other protocols. What makes this different from the other serial-mcp tools out there? Well for one I actually use this. This MCP exposes tooling that other libraries don't. These are tools not for the sake of tools, but because I actually needed something from this MCP and wanted to make it more replicable.
+LLMs are surprisingly good at interacting with hardware over serial, but without proper tooling they resort to hacking together Python scripts or asking you to copy-paste between terminals. This MCP server gives them a real serial interface instead.
+
+What makes this different from the other serial MCP servers? I actually use this. Every tool exists because I hit a wall without it, not because it sounded good on a feature list. It handles things the others don't: XMODEM file transfers, hardware signal control for reset/bootloader sequences, baud rate detection, triggered responses for catching time-sensitive boot prompts, and a ring buffer that doesn't lose data between tool calls.
 
 <img width="1456" height="1132" alt="image" src="https://github.com/user-attachments/assets/17e948ae-4888-4748-8694-77c1e257e329" />
-
-
-## What it does
-
-Exposes serial ports as MCP tools so an AI assistant can:
-
-- **Discover** connected USB-serial adapters and identify them by VID/PID
-- **Connect** to devices with configurable baud rate, data bits, stop bits, parity
-- **Send commands** and wait for responses (with regex-based expect patterns)
-- **Read/write raw hex** for binary protocols (Modbus, bootloader commands, etc.)
-- **Control hardware signals** (DTR/RTS) — reset Arduinos, enter ESP32 bootloader mode
-- **Auto-detect baud rate** by trying common rates and scoring readability
-- **Transfer files** with XMODEM (checksum or CRC-16)
-- **Log received data** to a file for capture / postmortem analysis
-- **Manage multiple sessions** simultaneously across different ports
 
 ## Install
 
@@ -96,87 +83,47 @@ claude mcp add serial-mcp -- python3 -m serial_mcp.server
 
 ## Tools
 
-All tools are prefixed with `serial_` to avoid name collisions with other MCP servers. Each tool includes MCP annotations (`readOnlyHint`, `destructiveHint`, etc.).
+All tools are prefixed with `serial_` to avoid collisions with other MCP servers.
 
-### Port discovery
-
-| Tool | Description |
+| Tool | What it does |
 |---|---|
-| `list_serial_ports` | List available serial ports with USB metadata (VID/PID, manufacturer) |
-| `serial_detect_baud` | Auto-detect baud rate by trying common rates and scoring ASCII readability |
-
-### Port control
-
-| Tool | Description |
-|---|---|
-| `serial_force_release` | Kill the process holding a serial port (SIGTERM → SIGKILL) so it can be opened |
-
-### Connection management
-
-| Tool | Description |
-|---|---|
-| `serial_open` | Open a serial connection with configurable inactivity timeout (default 15 min auto-close) |
+| `list_serial_ports` | List available ports with USB metadata (VID/PID, manufacturer) |
+| `serial_detect_baud` | Try common baud rates and score readability to find the right one |
+| `serial_force_release` | Kill the process holding a port (SIGTERM, then SIGKILL) so you can open it |
+| `serial_open` | Open a connection (configurable baud, data bits, stop bits, parity, inactivity timeout) |
 | `serial_close` | Close a connection and release the port |
-| `serial_change_settings` | Change baud/parity/etc. on a live connection without closing it |
+| `serial_change_settings` | Change baud/parity/etc. on a live connection without closing |
 | `serial_list_sessions` | List all open sessions |
-| `serial_status` | Detailed connection health, byte counts, uptime |
-
-### Read / write (text)
-
-| Tool | Description |
-|---|---|
-| `serial_command` | Send a string, wait for response. Supports `expect` regex for prompt detection |
+| `serial_status` | Connection health, byte counts, uptime |
+| `serial_command` | Send a string and wait for a response, with optional regex expect pattern |
 | `serial_write` | Fire-and-forget text write |
-| `serial_read` | Read buffered data (advances cursor) |
-| `serial_read_since` | Read historical data since a timestamp (non-destructive) |
+| `serial_read` | Read buffered text data (advances the cursor) |
+| `serial_read_since` | Read historical data since a timestamp (non-destructive, doesn't advance cursor) |
 | `serial_wait_for` | Block until a regex pattern appears in incoming data |
-
-### Read / write (binary)
-
-| Tool | Description |
-|---|---|
 | `serial_write_hex` | Write raw bytes as hex (`"AA 55 01 03"`) |
-| `serial_read_hex` | Read buffered data as hex string |
+| `serial_read_hex` | Read buffered data as a hex string |
+| `serial_set_signals` | Control DTR/RTS for reset sequences, bootloader entry, etc. |
+| `serial_get_signals` | Read CTS, DSR, RI, CD signal state |
+| `serial_send_break` | Send a serial break (used by U-Boot, Cisco ROMMON, etc.) |
+| `serial_clear_history` | Flush the receive buffer |
+| `serial_log_start` | Start capturing all received data to a file |
+| `serial_log_stop` | Stop logging, return file path and stats |
+| `serial_xmodem_send` | Send a file via XMODEM (checksum or CRC-16) |
+| `serial_xmodem_receive` | Receive a file via XMODEM (checksum or CRC-16) |
 
-### Hardware signals
+`serial_wait_for` and `serial_command` both support triggered responses: you can set `respond` or `respond_hex` so the server automatically transmits a reply the instant a pattern matches. This is useful for catching time-sensitive prompts like U-Boot's "Hit any key to stop autoboot" where the MCP round-trip would be too slow.
 
-| Tool | Description |
-|---|---|
-| `serial_set_signals` | Control DTR/RTS (reset micros, enter bootloader, etc.) |
-| `serial_get_signals` | Read DTR, RTS, CTS, DSR, RI, CD |
-| `serial_send_break` | Send a serial break (interrupt U-Boot, Cisco ROMMON, etc.) |
-
-### Session utilities
-
-| Tool | Description |
-|---|---|
-| `serial_clear_history` | Flush the receive buffer and free memory |
-
-### Logging
-
-| Tool | Description |
-|---|---|
-| `serial_log_start` | Capture all received data to a file (like minicom's capture) |
-| `serial_log_stop` | Stop logging and return file path, byte count, and duration |
-
-### File transfer
-
-| Tool | Description |
-|---|---|
-| `serial_xmodem_send` | Send a file via XMODEM (checksum or CRC-16 mode) |
-| `serial_xmodem_receive` | Receive a file via XMODEM (checksum or CRC-16 mode) |
-
-The reader thread is paused for the duration of an XMODEM transfer so the protocol has exclusive port access — `serial_read` and logging won't capture anything during the transfer.
+The reader thread pauses during XMODEM transfers so the protocol has exclusive port access.
 
 ## Prompts
 
-Four prompts are registered to guide common workflows:
+Four prompts guide common workflows:
 
 | Prompt | Description |
 |---|---|
-| `scan_devices` | Walk through identifying all connected serial devices by VID/PID |
+| `scan_devices` | Walk through identifying all connected serial devices |
 | `detect_baud_rate` | Run baud detection on a port and interpret the results |
-| `interactive_shell` | Open a connection and probe for the device prompt |
+| `interactive_shell` | Open a connection and probe for the device's shell prompt |
 | `safe_session` | Open/use/close lifecycle with mandatory port release reminder |
 
 ## Usage examples
@@ -226,32 +173,26 @@ Four prompts are registered to guide common workflows:
 5. serial_wait_for(pattern="waiting for download", timeout=3)
 ```
 
+### Catching a bootloader prompt
+
+```
+1. serial_open(port="/dev/ttyUSB0", baud_rate=115200)
+2. serial_wait_for(pattern="Hit any key to stop autoboot", respond=" ", timeout=60)
+```
+
 ## How it works
 
-Each `serial_open()` call creates a `SerialSession` with a background thread that continuously reads from the port into a timestamped ring buffer (default 10MB cap). This means:
+Each `serial_open()` creates a `SerialSession` with a background thread that reads from the port into a timestamped ring buffer (10MB default cap). Data is captured continuously, even between tool calls, so nothing gets lost. `serial_read_since()` can replay history without advancing the read cursor, and `serial_command()`/`serial_wait_for()` scan the buffer for regex matches as data arrives.
 
-- **No data loss** — bytes are captured even between tool calls
-- **Non-destructive reads** — `serial_read_since()` can replay history without advancing the cursor
-- **Pattern matching** — `serial_command()` and `serial_wait_for()` scan the buffer for regex matches in real-time
-- **Multiple sessions** — each port gets its own thread and buffer
+Sessions auto-close after a configurable inactivity timeout (default 15 minutes). A background reaper checks every 30 seconds and closes stale sessions. When the AI next tries to use a closed session, it gets a clear error explaining what happened. All tools are async, with blocking serial I/O wrapped in `asyncio.to_thread()`.
 
-All tools are async. Blocking serial I/O runs in `asyncio.to_thread()` so the event loop stays free.
+Serial output from text tools is normalized (`\r\n` → `\n`, trailing whitespace stripped). Binary/hex tools return raw data.
 
-### Session lifecycle
-
-Sessions auto-close after a configurable inactivity timeout (default 15 minutes). The AI can set a custom timeout via `serial_open(inactivity_timeout=...)`. A background reaper task checks every 30 seconds and closes stale sessions, surfacing a clear message when the AI next tries to use them. Server-level instructions, tool docstrings, and prompts all reinforce that ports must be closed when done.
-
-### Output normalization
-
-Serial output is normalized at the tool layer: `\r\n` → `\n`, trailing whitespace stripped per line. Raw bytes are preserved in `session.py` for binary/hex tools — normalization only affects text-returning tools (`serial_command`, `serial_read`, `serial_wait_for`, `serial_read_since`).
-
-### Port conflict handling
-
-When a port is held by another process, `serial_open` identifies the blocker via `lsof` and returns an actionable error with PID and command name. `serial_force_release` can kill the holder (with user approval) so the port can be reclaimed without leaving the AI session.
+When a port is held by another process, `serial_open` identifies the blocker via `lsof` and returns the PID and command name so the AI can offer to force-release it.
 
 ## Testing
 
-Run the unit tests (no hardware required — they use a `MockSerial` fixture):
+No hardware required. Tests use a `MockSerial` fixture:
 
 ```sh
 uv pip install -e ".[dev]"
@@ -263,8 +204,6 @@ Smoke-test the live server with the MCP Inspector:
 ```sh
 DANGEROUSLY_OMIT_AUTH=true npx @modelcontextprotocol/inspector -- python3 -m serial_mcp.server
 ```
-
-Set command to `python3` and args to `-m serial_mcp.server` in the inspector UI, then connect.
 
 ## Requirements
 
