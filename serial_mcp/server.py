@@ -86,6 +86,22 @@ mcp = FastMCP(
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+def _resolve_respond(respond: str | None, respond_hex: str | None, encoding: str) -> bytes | None:
+    """Resolve respond/respond_hex parameters into bytes for on_match_send."""
+    respond = respond or None
+    respond_hex = respond_hex or None
+    if respond is not None and respond_hex is not None:
+        raise ValueError("Cannot set both respond and respond_hex. Use one or the other.")
+    if respond is not None:
+        return respond.encode(encoding)
+    if respond_hex is not None:
+        try:
+            return bytes.fromhex(respond_hex.replace(" ", ""))
+        except ValueError as e:
+            raise ValueError(f"Invalid respond_hex: {e}. Expected format: '7F' or 'AA 55 01'") from e
+    return None
+
+
 def _normalize_output(data: str) -> str:
     """Normalize serial output for AI consumption."""
     data = data.replace("\r\n", "\n").replace("\r", "\n")
@@ -507,6 +523,8 @@ async def serial_command(
     session_id: str | None = None,
     encoding: str = "utf-8",
     append_newline: bool = True,
+    respond: str | None = None,
+    respond_hex: str | None = None,
 ) -> dict:
     """Send a command and wait for the response. This is the primary tool for
     interacting with serial devices — it combines write + read into a single
@@ -516,11 +534,17 @@ async def serial_command(
     response. Without `expect`, waits for the device to stop sending (300ms
     of silence after last received byte).
 
+    If `respond` or `respond_hex` is provided along with `expect`, the response
+    is sent immediately when the pattern matches — before this tool returns.
+    This enables sub-millisecond triggered responses for time-sensitive sequences.
+    The respond string is sent as-is (no newline appended).
+
     Examples:
         - Linux shell: serial_command(data="ls -la", expect="\\\\$")
         - AT modem:    serial_command(data="AT", expect="OK|ERROR")
         - Router CLI:  serial_command(data="show version", expect="#")
         - Simple ping: serial_command(data="hello", timeout=2)
+        - Reboot + catch bootloader: serial_command(data="reboot", expect="Hit any key", respond=" ")
 
     Args:
         data: Text to send to the device
@@ -529,14 +553,25 @@ async def serial_command(
         session_id: Port name of the session. Optional if only one session is open.
         encoding: Character encoding (default utf-8)
         append_newline: Whether to append \\r\\n to the data (default True)
+        respond: Text to send immediately when expect pattern matches (sent as-is, no newline)
+        respond_hex: Hex bytes to send when expect pattern matches (e.g. "7F", "AA 55")
     """
     session = _resolve_session(session_id)
+    on_match_send = _resolve_respond(respond, respond_hex, encoding)
+
+    if on_match_send is not None and not expect:
+        raise ValueError(
+            "respond/respond_hex requires expect to be set. "
+            "Use serial_wait_for for pattern-triggered responses without sending a command first."
+        )
 
     if append_newline:
         data += "\r\n"
 
     raw = data.encode(encoding)
-    result = await asyncio.to_thread(session.command, raw, expect=expect, timeout=timeout, encoding=encoding)
+    result = await asyncio.to_thread(
+        session.command, raw, expect=expect, timeout=timeout, encoding=encoding, on_match_send=on_match_send
+    )
     if "data" in result:
         result["data"] = _normalize_output(result["data"])
     if "matched" in result and result["matched"] is not None:
@@ -547,10 +582,10 @@ async def serial_command(
 
 @mcp.tool(
     annotations={
-        "readOnlyHint": True,
+        "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
-        "openWorldHint": False,
+        "openWorldHint": True,
     }
 )
 async def serial_wait_for(
@@ -558,28 +593,42 @@ async def serial_wait_for(
     timeout: float = 10.0,
     session_id: str | None = None,
     encoding: str = "utf-8",
+    respond: str | None = None,
+    respond_hex: str | None = None,
 ) -> dict:
-    """Wait for a specific pattern to appear in the serial output (without
-    sending anything). Blocks until the regex pattern matches in incoming data,
-    or until timeout.
+    """Wait for a specific pattern to appear in the serial output. Blocks until
+    the regex pattern matches in incoming data, or until timeout.
+
+    If `respond` or `respond_hex` is provided, that data is sent immediately
+    when the pattern matches — before this tool returns. This enables
+    sub-millisecond triggered responses for time-sensitive sequences like
+    interrupting a bootloader autoboot. The respond string is sent as-is
+    (no newline appended).
 
     Useful for waiting for boot messages, login prompts, or specific device
     states before interacting.
 
     Examples:
-        - Wait for login:  serial_wait_for(pattern="login:")
-        - Wait for U-Boot: serial_wait_for(pattern="U-Boot", timeout=30)
-        - Wait for prompt:  serial_wait_for(pattern="[$#>]\\\\s*$")
-        - Wait for ready:   serial_wait_for(pattern="System ready", timeout=60)
+        - Wait for login:      serial_wait_for(pattern="login:")
+        - Wait for U-Boot:     serial_wait_for(pattern="U-Boot", timeout=30)
+        - Wait for prompt:     serial_wait_for(pattern="[$#>]\\\\s*$")
+        - Wait for ready:      serial_wait_for(pattern="System ready", timeout=60)
+        - Interrupt autoboot:  serial_wait_for(pattern="Hit any key to stop autoboot", respond=" ", timeout=60)
+        - Bootloader handshake: serial_wait_for(pattern="Bootloader v", respond_hex="7F")
 
     Args:
         pattern: Regex pattern to wait for
         timeout: Max seconds to wait (default 10)
         session_id: Port name of the session. Optional if only one session is open.
         encoding: Character encoding (default utf-8)
+        respond: Text to send immediately when pattern matches (sent as-is, no newline)
+        respond_hex: Hex bytes to send when pattern matches (e.g. "7F", "AA 55")
     """
     session = _resolve_session(session_id)
-    result = await asyncio.to_thread(session.wait_for, pattern=pattern, timeout=timeout, encoding=encoding)
+    on_match_send = _resolve_respond(respond, respond_hex, encoding)
+    result = await asyncio.to_thread(
+        session.wait_for, pattern=pattern, timeout=timeout, encoding=encoding, on_match_send=on_match_send
+    )
     if "data" in result:
         result["data"] = _normalize_output(result["data"])
     if "matched" in result and result["matched"] is not None:

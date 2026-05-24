@@ -212,6 +212,7 @@ class SerialSession:
         timeout: float = 5.0,
         encoding: str = "utf-8",
         settle_time: float = 0.3,
+        on_match_send: bytes | None = None,
     ) -> dict:
         """Send data and wait for the response.
 
@@ -225,7 +226,7 @@ class SerialSession:
         self._serial.write(data)
 
         if expect:
-            return self._wait_for_pattern(expect, timeout, encoding, start_cursor)
+            return self._wait_for_pattern(expect, timeout, encoding, start_cursor, on_match_send=on_match_send)
 
         # No expect: wait for data, then wait for silence
         deadline = time.time() + timeout
@@ -259,15 +260,34 @@ class SerialSession:
             "timed_out": last_change_time is None,
         }
 
-    def wait_for(self, pattern: str, timeout: float = 10.0, encoding: str = "utf-8") -> dict:
+    def wait_for(
+        self,
+        pattern: str,
+        timeout: float = 10.0,
+        encoding: str = "utf-8",
+        on_match_send: bytes | None = None,
+    ) -> dict:
         """Wait for a regex pattern to appear in incoming data."""
         self._last_activity = time.time()
         with self._lock:
             start_cursor = len(self._history)
-        return self._wait_for_pattern(pattern, timeout, encoding, start_cursor)
+        return self._wait_for_pattern(pattern, timeout, encoding, start_cursor, on_match_send=on_match_send)
 
-    def _wait_for_pattern(self, pattern: str, timeout: float, encoding: str, start_cursor: int) -> dict:
-        """Wait for a regex pattern to appear in data received after start_cursor."""
+    def _wait_for_pattern(
+        self,
+        pattern: str,
+        timeout: float,
+        encoding: str,
+        start_cursor: int,
+        on_match_send: bytes | None = None,
+    ) -> dict:
+        """Wait for a regex pattern to appear in data received after start_cursor.
+
+        If on_match_send is provided, those bytes are written to the serial port
+        immediately when the pattern matches — before returning. This enables
+        sub-millisecond triggered responses for time-sensitive sequences like
+        bootloader autoboot interrupts.
+        """
         compiled = re.compile(pattern)
         deadline = time.time() + timeout
 
@@ -282,12 +302,16 @@ class SerialSession:
             if match:
                 with self._lock:
                     self._read_cursor = len(self._history)
-                return {
+                result = {
                     "data": text,
                     "matched": match.group(),
                     "byte_count": len(combined),
                     "timed_out": False,
                 }
+                if on_match_send is not None:
+                    result["response_bytes_sent"] = self._serial.write(on_match_send)
+                    result["responded"] = True
+                return result
 
             remaining = deadline - time.time()
             if remaining <= 0:
@@ -301,12 +325,16 @@ class SerialSession:
             self._read_cursor = len(self._history)
 
         combined = b"".join(chunk for _, chunk in chunks)
-        return {
+        result = {
             "data": combined.decode(encoding, errors="replace"),
             "matched": None,
             "byte_count": len(combined),
             "timed_out": True,
         }
+        if on_match_send is not None:
+            result["responded"] = False
+            result["response_bytes_sent"] = 0
+        return result
 
     # ── Write operations ─────────────────────────────────────────────
 

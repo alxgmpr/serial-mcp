@@ -271,6 +271,158 @@ def test_activity_tracking_read(mock_serial):
         session.close()
 
 
+def test_wait_for_with_on_match_send(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        time.sleep(0.05)
+
+        def delayed_inject():
+            time.sleep(0.1)
+            mock_serial.inject_data(b"Hit any key to stop autoboot: 3")
+
+        t = threading.Thread(target=delayed_inject)
+        t.start()
+        result = session.wait_for(r"Hit any key", timeout=2.0, on_match_send=b" ")
+        assert result["timed_out"] is False
+        assert result["responded"] is True
+        assert result["response_bytes_sent"] == 1
+        assert b" " in mock_serial.written_data
+        t.join()
+    finally:
+        session.close()
+
+
+def test_wait_for_on_match_send_timeout(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        result = session.wait_for(r"never_matches", timeout=0.2, on_match_send=b"\x03")
+        assert result["timed_out"] is True
+        assert result["responded"] is False
+        assert result["response_bytes_sent"] == 0
+        assert mock_serial.written_data == b""
+    finally:
+        session.close()
+
+
+def test_command_with_expect_and_on_match_send(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        time.sleep(0.05)
+
+        def delayed_response():
+            time.sleep(0.1)
+            mock_serial.inject_data(b"Rebooting...\r\nHit any key to stop autoboot: 3")
+
+        t = threading.Thread(target=delayed_response)
+        t.start()
+        result = session.command(b"reboot\r\n", expect="Hit any key", timeout=2.0, on_match_send=b" ")
+        assert result["timed_out"] is False
+        assert result["responded"] is True
+        assert result["response_bytes_sent"] == 1
+        written = mock_serial.written_data
+        assert b"reboot\r\n" in written
+        assert b" " in written
+        t.join()
+    finally:
+        session.close()
+
+
+def test_wait_for_without_on_match_send_no_respond_fields(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        time.sleep(0.05)
+
+        def delayed_inject():
+            time.sleep(0.1)
+            mock_serial.inject_data(b"hello world")
+
+        t = threading.Thread(target=delayed_inject)
+        t.start()
+        result = session.wait_for(r"hello", timeout=2.0)
+        assert result["timed_out"] is False
+        assert "responded" not in result
+        assert "response_bytes_sent" not in result
+        t.join()
+    finally:
+        session.close()
+
+
+def test_wait_for_on_match_send_multi_byte(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        time.sleep(0.05)
+
+        def delayed_inject():
+            time.sleep(0.1)
+            mock_serial.inject_data(b"Bootloader v2.0 ready")
+
+        t = threading.Thread(target=delayed_inject)
+        t.start()
+        result = session.wait_for(
+            r"Bootloader v", timeout=2.0, on_match_send=b"\x7f\xaa\x55"
+        )
+        assert result["timed_out"] is False
+        assert result["responded"] is True
+        assert result["response_bytes_sent"] == 3
+        assert mock_serial.written_data == b"\x7f\xaa\x55"
+        t.join()
+    finally:
+        session.close()
+
+
+def test_wait_for_timeout_without_on_match_send_no_respond_fields(mock_serial):
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    try:
+        result = session.wait_for(r"never_matches", timeout=0.1)
+        assert result["timed_out"] is True
+        assert "responded" not in result
+        assert "response_bytes_sent" not in result
+    finally:
+        session.close()
+
+
 def test_activity_tracking_data_receipt(mock_serial):
     session = SerialSession(
         port="/dev/ttyTEST",

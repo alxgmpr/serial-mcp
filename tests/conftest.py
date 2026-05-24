@@ -16,6 +16,7 @@ class MockSerial:
 
         self._is_open = True
         self._input_buffer = bytearray()
+        self._written_data = bytearray()
         self._lock = threading.Lock()
         self._dtr = True
         self._rts = True
@@ -68,7 +69,14 @@ class MockSerial:
             return data
 
     def write(self, data):
+        with self._lock:
+            self._written_data.extend(data)
         return len(data)
+
+    @property
+    def written_data(self) -> bytes:
+        with self._lock:
+            return bytes(self._written_data)
 
     def close(self):
         self._is_open = False

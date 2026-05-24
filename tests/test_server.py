@@ -3,6 +3,7 @@ import pytest
 from serial_mcp.server import (
     _auto_closed_sessions,
     _normalize_output,
+    _resolve_respond,
     _resolve_session,
     _session_timeouts,
     _sessions,
@@ -185,3 +186,63 @@ async def test_serial_open_generic_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Could not open port.*port not found"):
         await serial_open(FakeCtx(), port="/dev/ttyNONE")
+
+
+# ── Triggered response validation tests ──────────────────────────
+
+
+def test_resolve_respond_text():
+    result = _resolve_respond("hello", None, "utf-8")
+    assert result == b"hello"
+
+
+def test_resolve_respond_hex():
+    result = _resolve_respond(None, "7F", "utf-8")
+    assert result == b"\x7f"
+
+
+def test_resolve_respond_hex_with_spaces():
+    result = _resolve_respond(None, "AA 55 01", "utf-8")
+    assert result == b"\xaa\x55\x01"
+
+
+def test_resolve_respond_none():
+    result = _resolve_respond(None, None, "utf-8")
+    assert result is None
+
+
+def test_resolve_respond_empty_string_is_none():
+    assert _resolve_respond("", None, "utf-8") is None
+    assert _resolve_respond(None, "", "utf-8") is None
+
+
+def test_resolve_respond_both_raises():
+    with pytest.raises(ValueError, match="Cannot set both"):
+        _resolve_respond("hello", "7F", "utf-8")
+
+
+def test_resolve_respond_invalid_hex():
+    with pytest.raises(ValueError, match="Invalid respond_hex"):
+        _resolve_respond(None, "ZZ", "utf-8")
+
+
+@pytest.mark.asyncio
+async def test_serial_command_respond_without_expect(mock_serial):
+    """Should raise ValueError when respond is set without expect."""
+    from serial_mcp.server import serial_command
+    from serial_mcp.session import SerialSession
+
+    session = SerialSession(
+        port="/dev/ttyTEST",
+        baud_rate=115200,
+        data_bits=8,
+        stop_bits=1,
+        parity="none",
+        timeout=1.0,
+    )
+    _sessions["/dev/ttyTEST"] = session
+    try:
+        with pytest.raises(ValueError, match="respond/respond_hex requires expect"):
+            await serial_command(data="test", respond=" ")
+    finally:
+        session.close()
