@@ -393,9 +393,7 @@ def test_wait_for_on_match_send_multi_byte(mock_serial):
 
         t = threading.Thread(target=delayed_inject)
         t.start()
-        result = session.wait_for(
-            r"Bootloader v", timeout=2.0, on_match_send=b"\x7f\xaa\x55"
-        )
+        result = session.wait_for(r"Bootloader v", timeout=2.0, on_match_send=b"\x7f\xaa\x55")
         assert result["timed_out"] is False
         assert result["responded"] is True
         assert result["response_bytes_sent"] == 3
