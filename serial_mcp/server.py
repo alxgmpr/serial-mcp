@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import atexit
 import logging
@@ -10,19 +11,34 @@ from typing import Literal
 
 import serial
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.server import Settings
 from pydantic import create_model
 from serial.tools import list_ports
 
 from serial_mcp.session import SerialSession
 
 _DEFAULT_INACTIVITY_TIMEOUT = 900  # 15 minutes
+_DEFAULT_MAX_OUTPUT_BYTES = 16_384
 _REAPER_INTERVAL = 30
+_CORE_TOOLS = {
+    "list_serial_ports",
+    "serial_open",
+    "serial_close",
+    "serial_execute",
+    "serial_command",
+    "serial_detect_baud",
+    "serial_status",
+}
 
 _sessions: dict[str, SerialSession] = {}
 _session_timeouts: dict[str, float] = {}
 _auto_closed_sessions: dict[str, str] = {}
 
 logger = logging.getLogger("serial_mcp")
+
+# MCP 1.29 leaves Settings.lifespan as an unresolved forward reference.
+# Rebuilding is safe to remove once modelcontextprotocol/python-sdk#3294 ships.
+Settings.model_rebuild()
 
 
 def _cleanup_sessions():
@@ -78,7 +94,8 @@ mcp = FastMCP(
         "Serial ports are exclusive resources. After calling serial_open(), call serial_close() before ending the "
         "task, switching to unrelated work, or abandoning the operation. Do not report completion until "
         "serial_close succeeds. If closing fails, report the session_id and auto-close deadline. Sessions may remain "
-        "open across related tool calls and automatically close after their configured inactivity timeout."
+        "open across related tool calls and automatically close after their configured inactivity timeout. "
+        "serial_execute() opens and closes its own session and requires no separate serial_close() call."
     ),
     lifespan=_lifespan,
 )
@@ -110,6 +127,49 @@ def _normalize_output(data: str) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _validate_output_limit(max_output_bytes: int) -> None:
+    if max_output_bytes < 1:
+        raise ValueError("max_output_bytes must be at least 1")
+
+
+def _limit_text_result(result: dict, max_output_bytes: int, encoding: str) -> dict:
+    """Limit textual result data to its newest bytes and add truncation metadata."""
+    _validate_output_limit(max_output_bytes)
+    data = result.get("data", "")
+    encoded = data.encode(encoding, errors="replace")
+    truncated = len(encoded) > max_output_bytes
+    if truncated:
+        encoded = encoded[-max_output_bytes:]
+        data = encoded.decode(encoding, errors="ignore")
+        result["data"] = data
+
+    returned_bytes = len(encoded) if truncated else result.get("byte_count", len(encoded))
+    result["truncated"] = truncated
+    result["returned_bytes"] = returned_bytes
+    result["omitted_bytes"] = max(0, result.get("byte_count", returned_bytes) - returned_bytes)
+
+    matched = result.get("matched")
+    if matched is not None:
+        matched_bytes = matched.encode(encoding, errors="replace")
+        if len(matched_bytes) > max_output_bytes:
+            result["matched"] = matched_bytes[-max_output_bytes:].decode(encoding, errors="ignore")
+            result["matched_truncated"] = True
+    return result
+
+
+def _limit_hex_result(result: dict, max_output_bytes: int) -> dict:
+    """Limit a hex result to its newest raw bytes and add truncation metadata."""
+    _validate_output_limit(max_output_bytes)
+    raw = bytes.fromhex(result.get("hex", ""))
+    truncated = len(raw) > max_output_bytes
+    returned = raw[-max_output_bytes:] if truncated else raw
+    result["hex"] = returned.hex(" ")
+    result["truncated"] = truncated
+    result["returned_bytes"] = len(returned)
+    result["omitted_bytes"] = max(0, result.get("byte_count", len(raw)) - len(returned))
+    return result
+
+
 def _session_lifecycle(session: SerialSession, inactivity_timeout: float) -> dict:
     """Return cleanup requirements and the session's exact inactivity deadline."""
     last_activity_at = session.last_activity
@@ -118,8 +178,8 @@ def _session_lifecycle(session: SerialSession, inactivity_timeout: float) -> dic
         "cleanup_required": True,
         "cleanup_tool": "serial_close",
         "inactivity_timeout": inactivity_timeout,
-        "last_activity_at": last_activity_at,
-        "auto_close_at": auto_close_at,
+        "last_activity_at": int(last_activity_at),
+        "auto_close_at": int(auto_close_at),
         "auto_close_in": max(0, round(auto_close_at - time.time(), 1)),
     }
 
@@ -445,7 +505,7 @@ async def serial_open(
     return {
         "session_id": port,
         "message": f"Connected to {port} at {baud_rate} baud ({data_bits}{parity[0].upper()}{stop_bits})",
-        "connected_at": session.connected_at,
+        "connected_at": int(session.connected_at),
         **_session_lifecycle(session, inactivity_timeout),
     }
 
@@ -530,6 +590,63 @@ async def serial_change_settings(
     }
 
 
+@mcp.tool(
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def serial_execute(
+    ctx: Context,
+    data: str,
+    port: str | None = None,
+    baud_rate: int = 115200,
+    expect: str | None = None,
+    timeout: float = 5.0,
+    encoding: str = "utf-8",
+    append_newline: bool = True,
+    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+) -> dict:
+    """Open 8N1, run one text command, and always close.
+
+    Replaces open/command/close for a single command. Use an explicit session
+    for multi-step, binary, non-8N1, or triggered-response work.
+
+    Args:
+        data: Text to send
+        port: Port path; omit to choose automatically
+        baud_rate: Connection speed
+        expect: Response regex
+        timeout: Response deadline in seconds
+        encoding: Text encoding
+        append_newline: Whether to append CRLF
+    """
+    opened = await serial_open(ctx, port=port, baud_rate=baud_rate)
+    session_id = opened.get("session_id")
+    if session_id is None:
+        return opened
+
+    try:
+        result = await serial_command(
+            data=data,
+            expect=expect,
+            timeout=timeout,
+            session_id=session_id,
+            encoding=encoding,
+            append_newline=append_newline,
+            max_output_bytes=max_output_bytes,
+        )
+    finally:
+        await serial_close(session_id)
+
+    result.pop("session_id", None)
+    result["port"] = session_id
+    result["closed"] = True
+    return result
+
+
 # ── Command / expect ─────────────────────────────────────────────────
 
 
@@ -550,6 +667,7 @@ async def serial_command(
     append_newline: bool = True,
     respond: str | None = None,
     respond_hex: str | None = None,
+    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
 ) -> dict:
     """Send a command and wait for the response. This is the primary tool for
     interacting with serial devices — it combines write + read into a single
@@ -601,6 +719,7 @@ async def serial_command(
         result["data"] = _normalize_output(result["data"])
     if "matched" in result and result["matched"] is not None:
         result["matched"] = _normalize_output(result["matched"])
+    _limit_text_result(result, max_output_bytes, encoding)
     result["session_id"] = session.port
     return result
 
@@ -620,6 +739,7 @@ async def serial_wait_for(
     encoding: str = "utf-8",
     respond: str | None = None,
     respond_hex: str | None = None,
+    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
 ) -> dict:
     """Wait for a specific pattern to appear in the serial output. Blocks until
     the regex pattern matches in incoming data, or until timeout.
@@ -658,6 +778,7 @@ async def serial_wait_for(
         result["data"] = _normalize_output(result["data"])
     if "matched" in result and result["matched"] is not None:
         result["matched"] = _normalize_output(result["matched"])
+    _limit_text_result(result, max_output_bytes, encoding)
     result["session_id"] = session.port
     return result
 
@@ -713,6 +834,7 @@ async def serial_read(
     session_id: str | None = None,
     timeout: float = 1.0,
     encoding: str = "utf-8",
+    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
 ) -> dict:
     """Read all buffered data from the serial port.
 
@@ -731,6 +853,7 @@ async def serial_read(
     result = await asyncio.to_thread(session.read_buffer, timeout=timeout, encoding=encoding)
     if "data" in result:
         result["data"] = _normalize_output(result["data"])
+    _limit_text_result(result, max_output_bytes, encoding)
     result["session_id"] = session.port
     return result
 
@@ -747,6 +870,7 @@ async def serial_read_since(
     session_id: str | None = None,
     since: float | None = None,
     encoding: str = "utf-8",
+    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
 ) -> dict:
     """Read historical data received since a given timestamp (non-destructive).
 
@@ -763,8 +887,11 @@ async def serial_read_since(
     result = session.read_since(since=since, encoding=encoding)
     if "data" in result:
         result["data"] = _normalize_output(result["data"])
+    _limit_text_result(result, max_output_bytes, encoding)
     result["session_id"] = session.port
-    result["connected_at"] = session.connected_at
+    result["connected_at"] = int(session.connected_at)
+    if result["time_range"] is not None:
+        result["time_range"] = {name: int(value) for name, value in result["time_range"].items()}
     return result
 
 
@@ -822,6 +949,7 @@ async def serial_write_hex(
 async def serial_read_hex(
     session_id: str | None = None,
     timeout: float = 1.0,
+    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
 ) -> dict:
     """Read buffered data as hex-encoded bytes (for binary protocols).
 
@@ -834,6 +962,7 @@ async def serial_read_hex(
     """
     session = _resolve_session(session_id)
     result = await asyncio.to_thread(session.read_buffer_hex, timeout=timeout)
+    _limit_hex_result(result, max_output_bytes)
     result["session_id"] = session.port
     return result
 
@@ -1256,7 +1385,7 @@ async def serial_list_sessions() -> dict:
                 "baud_rate": s.baud_rate,
                 "healthy": s.is_healthy,
                 "uptime_seconds": round(s.uptime, 1),
-                "connected_at": s.connected_at,
+                "connected_at": int(s.connected_at),
                 "idle_seconds": round(s.inactivity_seconds, 1),
                 **_session_lifecycle(s, timeout),
             }
@@ -1307,7 +1436,7 @@ async def serial_status(session_id: str | None = None) -> dict:
                     "bytes_in_buffer": s.bytes_in_buffer,
                     "total_bytes_received": s.total_bytes_received,
                     "uptime_seconds": round(s.uptime, 1),
-                    "connected_at": s.connected_at,
+                    "connected_at": int(s.connected_at),
                     "idle_seconds": round(s.inactivity_seconds, 1),
                     **_session_lifecycle(s, t),
                 }
@@ -1324,7 +1453,6 @@ async def serial_status(session_id: str | None = None) -> dict:
     return {
         "connected": True,
         "session_id": session.port,
-        "port": session.port,
         "baud_rate": session.baud_rate,
         "data_bits": session.data_bits,
         "stop_bits": session.stop_bits,
@@ -1334,10 +1462,43 @@ async def serial_status(session_id: str | None = None) -> dict:
         "bytes_in_buffer": session.bytes_in_buffer,
         "total_bytes_received": session.total_bytes_received,
         "uptime_seconds": round(session.uptime, 1),
-        "connected_at": session.connected_at,
+        "connected_at": int(session.connected_at),
         "idle_seconds": round(session.inactivity_seconds, 1),
         **_session_lifecycle(session, t),
     }
+
+
+_TOOL_DESCRIPTIONS = {
+    "list_serial_ports": "List available serial ports and USB metadata.",
+    "serial_force_release": "Terminate the process holding a serial port. Destructive.",
+    "serial_open": "Open a serial session. Close it with serial_close when finished.",
+    "serial_close": "Close a serial session and release its port.",
+    "serial_change_settings": "Change settings on an open serial session.",
+    "serial_execute": "Open 8N1, run one text command, and always close.",
+    "serial_command": "Send text and collect output until a regex matches, timeout, or silence.",
+    "serial_wait_for": "Wait for a regex in incoming output, optionally responding on match.",
+    "serial_write": "Write text without waiting for a response.",
+    "serial_read": "Consume buffered text, returning the newest bytes up to the output limit.",
+    "serial_read_since": "Read history without consuming it, returning the newest bytes up to the limit.",
+    "serial_write_hex": "Write raw bytes supplied as hexadecimal.",
+    "serial_read_hex": "Consume buffered bytes and return limited hexadecimal output.",
+    "serial_set_signals": "Set DTR or RTS on an open session.",
+    "serial_get_signals": "Read modem-control signal states.",
+    "serial_send_break": "Send a serial break signal.",
+    "serial_detect_baud": "Try common baud rates and rank readable responses.",
+    "serial_clear_history": "Clear a session's receive history.",
+    "serial_log_start": "Start logging received data to a file.",
+    "serial_log_stop": "Stop logging and return capture statistics.",
+    "serial_xmodem_send": "Send a file with XMODEM checksum or CRC mode.",
+    "serial_xmodem_receive": "Receive a file with XMODEM checksum or CRC mode.",
+    "serial_list_sessions": "List open serial sessions and cleanup deadlines.",
+    "serial_status": "Return connection health and session statistics.",
+}
+
+for _tool_name, _description in _TOOL_DESCRIPTIONS.items():
+    mcp._tool_manager.get_tool(_tool_name).description = _description
+
+_ALL_TOOL_REGISTRATIONS = dict(mcp._tool_manager._tools)
 
 
 # ── MCP Prompts ──────────────────────────────────────────────────────
@@ -1403,7 +1564,32 @@ def safe_session(port: str, baud_rate: int = 115200) -> str:
 # ── Entrypoint ───────────────────────────────────────────────────────
 
 
-def main():
+def _apply_tool_profile(profile: str) -> None:
+    """Expose either the full tool set or the common-workflow subset."""
+    if profile != "core":
+        if profile != "full":
+            raise ValueError(f"Unknown tool profile: {profile}")
+        mcp._tool_manager._tools.clear()
+        mcp._tool_manager._tools.update(_ALL_TOOL_REGISTRATIONS)
+        return
+
+    mcp._tool_manager._tools.clear()
+    mcp._tool_manager._tools.update(_ALL_TOOL_REGISTRATIONS)
+    for tool in mcp._tool_manager.list_tools():
+        if tool.name not in _CORE_TOOLS:
+            mcp.remove_tool(tool.name)
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="MCP server for serial devices")
+    parser.add_argument(
+        "--profile",
+        choices=("full", "core"),
+        default=os.environ.get("SERIAL_MCP_TOOL_PROFILE", "full"),
+        help="Tool set to expose (default: full; env: SERIAL_MCP_TOOL_PROFILE)",
+    )
+    args = parser.parse_args(argv)
+    _apply_tool_profile(args.profile)
     mcp.run()
 
 

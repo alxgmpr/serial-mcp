@@ -89,6 +89,16 @@ claude mcp add serial-mcp -- python3 -m serial_mcp.server
 }
 ```
 
+### Tool profiles
+
+The default `full` profile exposes all tools. Use `core` when your client loads every schema and you only need the common text workflow:
+
+```sh
+serial-mcp --profile core
+```
+
+The core profile exposes `list_serial_ports`, `serial_open`, `serial_close`, `serial_execute`, `serial_command`, `serial_detect_baud`, and `serial_status`. You can also set `SERIAL_MCP_TOOL_PROFILE=core` in the server environment.
+
 ## Tools
 
 Tools use the `serial_` prefix to avoid collisions, except for the discovery entry point `list_serial_ports`.
@@ -103,6 +113,7 @@ Tools use the `serial_` prefix to avoid collisions, except for the discovery ent
 | `serial_change_settings` | Change baud/parity/etc. on a live connection without closing |
 | `serial_list_sessions` | List all open sessions |
 | `serial_status` | Connection health, byte counts, uptime |
+| `serial_execute` | Open, run one text command, and close in a single tool call |
 | `serial_command` | Send a string and wait for a response, with optional regex expect pattern |
 | `serial_write` | Fire-and-forget text write |
 | `serial_read` | Read buffered text data (advances the cursor) |
@@ -121,7 +132,11 @@ Tools use the `serial_` prefix to avoid collisions, except for the discovery ent
 
 `serial_wait_for` and `serial_command` both support triggered responses: you can set `respond` or `respond_hex` so the server automatically transmits a reply the instant a pattern matches. This is useful for catching time-sensitive prompts like U-Boot's "Hit any key to stop autoboot" where the MCP round-trip would be too slow.
 
+Text commands and reads return at most 16 KiB by default; hex reads use the same raw-byte limit. Set `max_output_bytes` per call when needed. When output is larger, the tools retain the newest bytes and report `truncated`, `returned_bytes`, and `omitted_bytes`; `byte_count` remains the total serial bytes captured.
+
 The reader thread pauses during XMODEM transfers so the protocol has exclusive port access.
+
+For a single text command, prefer `serial_execute`. It replaces the usual open/command/close sequence with one call and always releases the port, including when command processing fails. It uses 8N1 framing; use an explicit session for multi-step work, other framing, binary data, or triggered responses.
 
 `serial_open`, `serial_status`, and `serial_list_sessions` return explicit lifecycle metadata for every open session:
 
@@ -130,8 +145,8 @@ The reader thread pauses during XMODEM transfers so the protocol has exclusive p
 | `cleanup_required` | `true` while the session owns the serial port |
 | `cleanup_tool` | Tool to call when finished (`serial_close`) |
 | `inactivity_timeout` | Configured inactivity period in seconds |
-| `last_activity_at` | Latest session activity as a Unix timestamp |
-| `auto_close_at` | Current inactivity deadline as a Unix timestamp |
+| `last_activity_at` | Latest session activity as integer Unix epoch seconds |
+| `auto_close_at` | Current inactivity deadline as integer Unix epoch seconds |
 | `auto_close_in` | Approximate seconds remaining until that deadline |
 
 The deadline moves forward whenever data is read, received, or written. It is the exact point at which the session exceeds its inactivity allowance; the background reaper closes an expired session on its next check, currently within 30 seconds.
@@ -150,14 +165,11 @@ Four prompts guide common workflows:
 ## Quick example
 
 ```
-1. list_serial_ports()                        → find /dev/ttyUSB0
-2. serial_open(port="/dev/ttyUSB0")           → connect at 115200 8N1
-3. serial_command(data="", expect="[$#]")     → get the shell prompt
-4. serial_command(data="uname -a", expect="\\$")
-5. serial_close()                              → release the port
+serial_execute(port="/dev/ttyUSB0", data="uname -a", expect="\\$")
+# → runs the command and releases the port
 ```
 
-For unknown devices, run `serial_detect_baud()` before opening the port. Binary protocols use the hex read/write tools, while `serial_wait_for(..., respond=" ")` can catch time-sensitive boot prompts.
+For a shell session requiring multiple commands, use `serial_open`, `serial_command`, then `serial_close`. For unknown devices, run `serial_detect_baud()` first. Binary protocols use the hex read/write tools, while `serial_wait_for(..., respond=" ")` can catch time-sensitive boot prompts.
 
 ## How it works
 
@@ -165,7 +177,7 @@ Each `serial_open()` creates a `SerialSession` with a background thread that rea
 
 Sessions auto-close after a configurable inactivity timeout (default 15 minutes). Lifecycle metadata gives the model the latest activity time and current auto-close deadline rather than only a relative countdown. A background reaper checks every 30 seconds and closes stale sessions. When the AI next tries to use a closed session, it gets a clear error explaining what happened. All tools are async, with blocking serial I/O wrapped in `asyncio.to_thread()`.
 
-Serial output from text tools is normalized (`\r\n` → `\n`, trailing whitespace stripped). Binary/hex tools return raw data.
+Serial output from text tools is normalized (`\r\n` → `\n`, trailing whitespace stripped). Binary/hex tools return raw data. Timestamp fields use integer epoch seconds.
 
 When a port is held by another process, `serial_open` identifies the blocker via `lsof` and returns the PID and command name so the AI can offer to force-release it.
 

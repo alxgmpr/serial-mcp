@@ -1,3 +1,8 @@
+import json
+import subprocess
+import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -82,7 +87,47 @@ def test_server_instructions_describe_session_cleanup_without_forcing_per_call_c
 
     instructions = mcp._mcp_server.instructions
     assert "Do not report completion until serial_close succeeds" in instructions
+    assert "serial_execute() opens and closes its own session" in instructions
     assert "Never hold a port open between interactions" not in instructions
+
+
+def test_server_import_has_no_warnings():
+    result = subprocess.run(
+        [sys.executable, "-W", "error", "-c", "import serial_mcp.server"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_core_profile_exposes_only_the_seven_common_workflow_tools():
+    from serial_mcp.server import _apply_tool_profile, mcp
+
+    _apply_tool_profile("core")
+    try:
+        names = {tool.name for tool in await mcp.list_tools()}
+        assert names == {
+            "list_serial_ports",
+            "serial_open",
+            "serial_close",
+            "serial_execute",
+            "serial_command",
+            "serial_detect_baud",
+            "serial_status",
+        }
+    finally:
+        _apply_tool_profile("full")
+
+
+@pytest.mark.asyncio
+async def test_tool_descriptions_are_less_than_one_quarter_of_schema_payload():
+    from serial_mcp.server import mcp
+
+    tools = await mcp.list_tools()
+    schema_bytes = sum(len(json.dumps(tool.model_dump(exclude_none=True))) for tool in tools)
+    description_bytes = sum(len(tool.description or "") for tool in tools)
+    assert description_bytes < schema_bytes / 4
 
 
 # ── Session lifecycle metadata tests ─────────────────────────────────
@@ -103,6 +148,9 @@ async def test_serial_open_returns_cleanup_metadata(mock_serial):
         assert result["cleanup_tool"] == "serial_close"
         assert result["last_activity_at"] > 0
         assert result["auto_close_at"] == pytest.approx(result["last_activity_at"] + 900)
+        assert isinstance(result["connected_at"], int)
+        assert isinstance(result["last_activity_at"], int)
+        assert isinstance(result["auto_close_at"], int)
         assert "last_activity_at_iso" not in result
         assert "auto_close_at_iso" not in result
     finally:
@@ -132,6 +180,10 @@ async def test_serial_status_returns_exact_auto_close_deadline(mock_serial):
         assert result["cleanup_required"] is True
         assert result["last_activity_at"] == 1_700_000_000.0
         assert result["auto_close_at"] == 1_700_000_900.0
+        assert isinstance(result["connected_at"], int)
+        assert isinstance(result["last_activity_at"], int)
+        assert isinstance(result["auto_close_at"], int)
+        assert "port" not in result
         assert "last_activity_at_iso" not in result
         assert "auto_close_at_iso" not in result
     finally:
@@ -166,7 +218,167 @@ async def test_serial_list_sessions_includes_lifecycle_metadata(mock_serial):
         session.close()
 
 
+# ── One-shot command tests ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_serial_execute_runs_command_and_closes_session(mock_serial):
+    """One-shot execution should return the response without leaving a session open."""
+    from serial_mcp import server
+
+    serial_execute = getattr(server, "serial_execute", None)
+    assert serial_execute is not None
+
+    class FakeCtx:
+        async def elicit(self, *args, **kwargs):
+            raise NotImplementedError
+
+    def delayed_response():
+        time.sleep(0.05)
+        mock_serial.inject_data(b"OK\r\n")
+
+    response_thread = threading.Thread(target=delayed_response)
+    response_thread.start()
+    result = await serial_execute(
+        FakeCtx(),
+        data="AT",
+        port="/dev/ttyTEST",
+        baud_rate=9600,
+        expect="OK",
+        timeout=1.0,
+    )
+    response_thread.join()
+
+    assert result["data"] == "OK"
+    assert result["matched"] == "OK"
+    assert result["port"] == "/dev/ttyTEST"
+    assert result["closed"] is True
+    assert "session_id" not in result
+    assert "cleanup_required" not in result
+    assert _sessions == {}
+    assert mock_serial.is_open is False
+
+
+@pytest.mark.asyncio
+async def test_serial_execute_closes_session_when_command_fails(mock_serial):
+    """One-shot execution should release the port when command processing raises."""
+    from serial_mcp import server
+
+    serial_execute = getattr(server, "serial_execute", None)
+    assert serial_execute is not None
+
+    class FakeCtx:
+        async def elicit(self, *args, **kwargs):
+            raise NotImplementedError
+
+    with pytest.raises(LookupError):
+        await serial_execute(
+            FakeCtx(),
+            data="AT",
+            port="/dev/ttyTEST",
+            encoding="not-an-encoding",
+        )
+
+    assert _sessions == {}
+    assert mock_serial.is_open is False
+
+
+def test_serial_execute_description_uses_compact_crlf_text():
+    """The tool description should not expand escaped newlines into extra tokens."""
+    from serial_mcp import server
+
+    assert "append CRLF" in server.serial_execute.__doc__
+    assert "\r" not in server.serial_execute.__doc__
+    assert len(server.serial_execute.__doc__) < 550
+
+
 # ── Output normalization tests ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_serial_read_limits_output_to_most_recent_bytes(mock_serial):
+    from serial_mcp.server import serial_read
+    from serial_mcp.session import SerialSession
+
+    session = SerialSession(port="/dev/ttyTEST", baud_rate=115200, data_bits=8, stop_bits=1, parity="none", timeout=1.0)
+    _sessions[session.port] = session
+    try:
+        mock_serial.inject_data(b"boot-older\nboot-newest")
+        time.sleep(0.05)
+        result = await serial_read(max_output_bytes=11)
+        assert result["data"] == "boot-newest"
+        assert result["byte_count"] == 22
+        assert result["returned_bytes"] == 11
+        assert result["omitted_bytes"] == 11
+        assert result["truncated"] is True
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_serial_command_reports_untruncated_output(mock_serial):
+    from serial_mcp.server import serial_command
+    from serial_mcp.session import SerialSession
+
+    session = SerialSession(port="/dev/ttyTEST", baud_rate=115200, data_bits=8, stop_bits=1, parity="none", timeout=1.0)
+    _sessions[session.port] = session
+
+    def delayed_response():
+        time.sleep(0.05)
+        mock_serial.inject_data(b"OK")
+
+    response_thread = threading.Thread(target=delayed_response)
+    response_thread.start()
+    try:
+        result = await serial_command(data="AT", expect="OK", timeout=1, max_output_bytes=16)
+        assert result["data"] == "OK"
+        assert result["returned_bytes"] == 2
+        assert result["omitted_bytes"] == 0
+        assert result["truncated"] is False
+    finally:
+        response_thread.join()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_serial_read_since_limits_output_and_integerizes_time_range(mock_serial):
+    from serial_mcp.server import serial_read_since
+    from serial_mcp.session import SerialSession
+
+    session = SerialSession(port="/dev/ttyTEST", baud_rate=115200, data_bits=8, stop_bits=1, parity="none", timeout=1.0)
+    _sessions[session.port] = session
+    try:
+        mock_serial.inject_data(b"1234567890")
+        time.sleep(0.05)
+        result = await serial_read_since(max_output_bytes=4)
+        assert result["data"] == "7890"
+        assert result["truncated"] is True
+        assert result["omitted_bytes"] == 6
+        assert isinstance(result["connected_at"], int)
+        assert isinstance(result["time_range"]["earliest"], int)
+        assert isinstance(result["time_range"]["latest"], int)
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_serial_read_hex_limits_raw_bytes(mock_serial):
+    from serial_mcp.server import serial_read_hex
+    from serial_mcp.session import SerialSession
+
+    session = SerialSession(port="/dev/ttyTEST", baud_rate=115200, data_bits=8, stop_bits=1, parity="none", timeout=1.0)
+    _sessions[session.port] = session
+    try:
+        mock_serial.inject_data(bytes(range(10)))
+        time.sleep(0.05)
+        result = await serial_read_hex(max_output_bytes=4)
+        assert result["hex"] == "06 07 08 09"
+        assert result["byte_count"] == 10
+        assert result["returned_bytes"] == 4
+        assert result["omitted_bytes"] == 6
+        assert result["truncated"] is True
+    finally:
+        session.close()
 
 
 def test_normalize_output_crlf():
