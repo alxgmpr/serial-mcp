@@ -4,26 +4,27 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build/mcpb"
+MCPB_VERSION="2.1.2"
 
 echo "==> Cleaning build directory"
 rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR/server"
+mkdir -p "$BUILD_DIR/server" "$BUILD_DIR/serial_mcp"
 
 echo "==> Copying serial_mcp package"
-cp -r "$PROJECT_DIR/serial_mcp" "$BUILD_DIR/server/"
+cp "$PROJECT_DIR"/serial_mcp/*.py "$BUILD_DIR/serial_mcp/"
 
 echo "==> Copying entry script"
 cp "$SCRIPT_DIR/run.py" "$BUILD_DIR/server/"
 
-echo "==> Vendoring dependencies"
-pip install -t "$BUILD_DIR/server/vendor" -r "$PROJECT_DIR/requirements.txt" --quiet
+echo "==> Copying uv project files"
+cp "$PROJECT_DIR/pyproject.toml" "$PROJECT_DIR/uv.lock" "$PROJECT_DIR/README.md" "$PROJECT_DIR/LICENSE" "$BUILD_DIR/"
 
 echo "==> Copying manifest"
 cp "$PROJECT_DIR/manifest.json" "$BUILD_DIR/"
 
 echo "==> Packing MCPB"
 cd "$BUILD_DIR"
-npx @anthropic-ai/mcpb pack
+npx --yes "@anthropic-ai/mcpb@$MCPB_VERSION" pack
 
 NAME=$(python3 -c "import json; print(json.load(open('manifest.json'))['name'])")
 VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")

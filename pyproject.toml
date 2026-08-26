@@ -22,11 +22,13 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: System :: Hardware",
     "Topic :: Communications",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.28,<2",
+    "pydantic>=2,<3",
     "pyserial>=3.5",
 ]
 

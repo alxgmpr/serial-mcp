@@ -52,7 +52,7 @@ Entry point: `serial_mcp.server:main()` (registered as `serial-mcp` console scri
 - **Baud detection**: Tries 8 common rates, scores readability by printable ASCII ratio, optional `\r\n` probing.
 - **XMODEM file transfer**: Pure-Python implementation with reader thread pause/resume. Uses callable abstraction for testability.
 - **Output normalization**: `\r\n` → `\n` and trailing whitespace stripped at the tool layer only — session.py stays raw for binary/hex tools.
-- **Inactivity auto-close**: Per-session timeout (default 15 min, configurable via `inactivity_timeout` on `serial_open`). Background reaper task closes stale sessions and records messages for the AI.
+- **Inactivity auto-close**: Per-session timeout (default 15 min, configurable via `inactivity_timeout` on `serial_open`). Open/status/list results expose cleanup requirements, latest activity, and the projected auto-close deadline as Unix timestamps. The background reaper closes stale sessions and records messages for the AI.
 - **Port-busy detection**: `serial_open` catches OS-level port-busy errors, identifies the blocking process via `lsof`, and suggests `serial_force_release()`. The force-release tool kills the holder (SIGTERM → SIGKILL).
 
 ## Testing

@@ -40,6 +40,14 @@ cd serial-mcp
 uv pip install -e .
 ```
 
+## Update
+
+```sh
+uv tool upgrade serial-mcp
+```
+
+Or with pip: `pip install --upgrade serial-mcp`
+
 ## Configure
 
 ### Claude Code
@@ -83,7 +91,7 @@ claude mcp add serial-mcp -- python3 -m serial_mcp.server
 
 ## Tools
 
-All tools are prefixed with `serial_` to avoid collisions with other MCP servers.
+Tools use the `serial_` prefix to avoid collisions, except for the discovery entry point `list_serial_ports`.
 
 | Tool | What it does |
 |---|---|
@@ -115,6 +123,19 @@ All tools are prefixed with `serial_` to avoid collisions with other MCP servers
 
 The reader thread pauses during XMODEM transfers so the protocol has exclusive port access.
 
+`serial_open`, `serial_status`, and `serial_list_sessions` return explicit lifecycle metadata for every open session:
+
+| Field | Meaning |
+|---|---|
+| `cleanup_required` | `true` while the session owns the serial port |
+| `cleanup_tool` | Tool to call when finished (`serial_close`) |
+| `inactivity_timeout` | Configured inactivity period in seconds |
+| `last_activity_at` | Latest session activity as a Unix timestamp |
+| `auto_close_at` | Current inactivity deadline as a Unix timestamp |
+| `auto_close_in` | Approximate seconds remaining until that deadline |
+
+The deadline moves forward whenever data is read, received, or written. It is the exact point at which the session exceeds its inactivity allowance; the background reaper closes an expired session on its next check, currently within 30 seconds.
+
 ## Prompts
 
 Four prompts guide common workflows:
@@ -126,65 +147,23 @@ Four prompts guide common workflows:
 | `interactive_shell` | Open a connection and probe for the device's shell prompt |
 | `safe_session` | Open/use/close lifecycle with mandatory port release reminder |
 
-## Usage examples
-
-### Interactive shell on a Linux device
+## Quick example
 
 ```
 1. list_serial_ports()                        → find /dev/ttyUSB0
 2. serial_open(port="/dev/ttyUSB0")           → connect at 115200 8N1
 3. serial_command(data="", expect="[$#]")     → get the shell prompt
 4. serial_command(data="uname -a", expect="\\$")
+5. serial_close()                              → release the port
 ```
 
-### Arduino / microcontroller
-
-```
-1. list_serial_ports()                        → find /dev/ttyACM0
-2. serial_open(port="/dev/ttyACM0", baud_rate=9600)
-3. serial_command(data="STATUS", timeout=2)
-4. serial_set_signals(dtr=False)              → reset the board
-5. serial_set_signals(dtr=True)
-6. serial_wait_for(pattern="Ready", timeout=5)
-```
-
-### Unknown baud rate
-
-```
-1. serial_detect_baud(port="/dev/ttyUSB0")    → recommends 9600
-2. serial_open(port="/dev/ttyUSB0", baud_rate=9600)
-```
-
-### Binary protocol (Modbus, etc.)
-
-```
-1. serial_open(port="/dev/ttyUSB0", baud_rate=9600)
-2. serial_write_hex(hex_string="01 03 00 00 00 0A C5 CD")
-3. serial_read_hex(timeout=2)
-```
-
-### ESP32 bootloader entry
-
-```
-1. serial_open(port="/dev/ttyUSB0", baud_rate=115200)
-2. serial_set_signals(dtr=False, rts=True)
-3. serial_set_signals(dtr=True, rts=False)
-4. serial_set_signals(dtr=False)
-5. serial_wait_for(pattern="waiting for download", timeout=3)
-```
-
-### Catching a bootloader prompt
-
-```
-1. serial_open(port="/dev/ttyUSB0", baud_rate=115200)
-2. serial_wait_for(pattern="Hit any key to stop autoboot", respond=" ", timeout=60)
-```
+For unknown devices, run `serial_detect_baud()` before opening the port. Binary protocols use the hex read/write tools, while `serial_wait_for(..., respond=" ")` can catch time-sensitive boot prompts.
 
 ## How it works
 
 Each `serial_open()` creates a `SerialSession` with a background thread that reads from the port into a timestamped ring buffer (10MB default cap). Data is captured continuously, even between tool calls, so nothing gets lost. `serial_read_since()` can replay history without advancing the read cursor, and `serial_command()`/`serial_wait_for()` scan the buffer for regex matches as data arrives.
 
-Sessions auto-close after a configurable inactivity timeout (default 15 minutes). A background reaper checks every 30 seconds and closes stale sessions. When the AI next tries to use a closed session, it gets a clear error explaining what happened. All tools are async, with blocking serial I/O wrapped in `asyncio.to_thread()`.
+Sessions auto-close after a configurable inactivity timeout (default 15 minutes). Lifecycle metadata gives the model the latest activity time and current auto-close deadline rather than only a relative countdown. A background reaper checks every 30 seconds and closes stale sessions. When the AI next tries to use a closed session, it gets a clear error explaining what happened. All tools are async, with blocking serial I/O wrapped in `asyncio.to_thread()`.
 
 Serial output from text tools is normalized (`\r\n` → `\n`, trailing whitespace stripped). Binary/hex tools return raw data.
 
@@ -209,7 +188,8 @@ DANGEROUSLY_OMIT_AUTH=true npx @modelcontextprotocol/inspector -- python3 -m ser
 
 - Python >= 3.10
 - [pyserial](https://pyserial.readthedocs.io/) >= 3.5
-- [mcp](https://github.com/modelcontextprotocol/python-sdk) >= 1.0.0
+- [mcp](https://github.com/modelcontextprotocol/python-sdk) >= 1.28, < 2
+- [pydantic](https://docs.pydantic.dev/) >= 2, < 3
 
 ## License
 

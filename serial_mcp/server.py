@@ -10,6 +10,7 @@ from typing import Literal
 
 import serial
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import create_model
 from serial.tools import list_ports
 
 from serial_mcp.session import SerialSession
@@ -74,10 +75,10 @@ async def _lifespan(app):
 mcp = FastMCP(
     "serial_mcp",
     instructions=(
-        "IMPORTANT: Always call serial_close() when you are done using a serial port. "
-        "Leaving ports open blocks other tools and processes from accessing the device. "
-        "If your task is complete or you encounter an unrecoverable error, close the port immediately. "
-        "Never hold a port open between interactions."
+        "Serial ports are exclusive resources. After calling serial_open(), call serial_close() before ending the "
+        "task, switching to unrelated work, or abandoning the operation. Do not report completion until "
+        "serial_close succeeds. If closing fails, report the session_id and auto-close deadline. Sessions may remain "
+        "open across related tool calls and automatically close after their configured inactivity timeout."
     ),
     lifespan=_lifespan,
 )
@@ -107,6 +108,30 @@ def _normalize_output(data: str) -> str:
     data = data.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.rstrip() for line in data.split("\n")]
     return "\n".join(lines).rstrip()
+
+
+def _session_lifecycle(session: SerialSession, inactivity_timeout: float) -> dict:
+    """Return cleanup requirements and the session's exact inactivity deadline."""
+    last_activity_at = session.last_activity
+    auto_close_at = last_activity_at + inactivity_timeout
+    return {
+        "cleanup_required": True,
+        "cleanup_tool": "serial_close",
+        "inactivity_timeout": inactivity_timeout,
+        "last_activity_at": last_activity_at,
+        "auto_close_at": auto_close_at,
+        "auto_close_in": max(0, round(auto_close_at - time.time(), 1)),
+    }
+
+
+async def _elicit_choice(ctx: Context, message: str, choices: list[str]) -> str | None:
+    """Ask the client to select one of a bounded set of string values."""
+    selection_type = Literal.__getitem__(tuple(choices))
+    choice_model = create_model("Choice", selection=(selection_type, ...))
+    result = await ctx.elicit(message, schema=choice_model)
+    if result.action != "accept" or result.data is None:
+        return None
+    return result.data.selection
 
 
 def _get_process_holding_port(port: str) -> dict | None:
@@ -337,7 +362,8 @@ async def serial_open(
     IMPORTANT: Always call serial_close() when you are finished with the port.
     Leaving a port open prevents other processes from accessing the device.
     The session will be automatically closed after inactivity_timeout seconds
-    of no activity.
+    of no activity. The result includes cleanup_required, cleanup_tool, and the
+    current projected auto-close deadline as a Unix timestamp.
 
     Common configurations:
     - Most devices: 115200 baud, 8N1 (the defaults)
@@ -362,13 +388,12 @@ async def serial_open(
             port = ports[0]
         else:
             try:
-                result = await ctx.elicit(
+                port = await _elicit_choice(
+                    ctx,
                     "Multiple serial ports found. Select one:",
-                    response_type=ports,
+                    ports,
                 )
-                if result.action == "accept" and result.data:
-                    port = result.data
-                else:
+                if port is None:
                     return {"error": "Port selection cancelled. Call serial_open(port=...) with a specific port."}
             except Exception:
                 # Elicitation not supported — return port list for the LLM to relay
@@ -421,7 +446,7 @@ async def serial_open(
         "session_id": port,
         "message": f"Connected to {port} at {baud_rate} baud ({data_bits}{parity[0].upper()}{stop_bits})",
         "connected_at": session.connected_at,
-        "inactivity_timeout": inactivity_timeout,
+        **_session_lifecycle(session, inactivity_timeout),
     }
 
 
@@ -1003,13 +1028,14 @@ async def serial_detect_baud(
 
     selected_baud = results[0]["baud_rate"]
     try:
-        elicit_result = await ctx.elicit(
+        selected_choice = await _elicit_choice(
+            ctx,
             f"Baud rate detection complete for {port}. Confirm rate:",
-            response_type=choices,
+            choices,
         )
-        if elicit_result.action == "accept" and elicit_result.data:
+        if selected_choice is not None:
             # Parse baud rate from the selection string (e.g., "115200 (98% readable)")
-            selected_baud = int(elicit_result.data.split(" ")[0])
+            selected_baud = int(selected_choice.split(" ")[0])
     except Exception:
         # Elicitation not supported — use top result
         pass
@@ -1215,7 +1241,12 @@ async def serial_xmodem_receive(
     }
 )
 async def serial_list_sessions() -> dict:
-    """List all open serial sessions with connection details."""
+    """List all open serial sessions with connection and cleanup details.
+
+    Each session includes its latest activity timestamp and projected auto-close
+    deadline as Unix timestamps. The deadline moves whenever the session has
+    new read/write activity.
+    """
     sessions_list = []
     for s in _sessions.values():
         timeout = _session_timeouts.get(s.port, _DEFAULT_INACTIVITY_TIMEOUT)
@@ -1227,7 +1258,7 @@ async def serial_list_sessions() -> dict:
                 "uptime_seconds": round(s.uptime, 1),
                 "connected_at": s.connected_at,
                 "idle_seconds": round(s.inactivity_seconds, 1),
-                "auto_close_in": max(0, round(timeout - s.inactivity_seconds, 1)),
+                **_session_lifecycle(s, timeout),
             }
         )
     return {
@@ -1250,7 +1281,8 @@ async def serial_status(session_id: str | None = None) -> dict:
     Reports whether the device is still connected, bytes buffered, total
     bytes received, connection parameters, and health status. If the USB
     adapter has been physically disconnected, the health field will indicate
-    the problem.
+    the problem. Also reports the latest activity timestamp and projected
+    auto-close deadline as Unix timestamps.
 
     Args:
         session_id: Port name of the session. Optional if only one session is open.
@@ -1277,7 +1309,7 @@ async def serial_status(session_id: str | None = None) -> dict:
                     "uptime_seconds": round(s.uptime, 1),
                     "connected_at": s.connected_at,
                     "idle_seconds": round(s.inactivity_seconds, 1),
-                    "auto_close_in": max(0, round(t - s.inactivity_seconds, 1)),
+                    **_session_lifecycle(s, t),
                 }
             )
         return {
@@ -1304,7 +1336,7 @@ async def serial_status(session_id: str | None = None) -> dict:
         "uptime_seconds": round(session.uptime, 1),
         "connected_at": session.connected_at,
         "idle_seconds": round(session.inactivity_seconds, 1),
-        "auto_close_in": max(0, round(t - session.inactivity_seconds, 1)),
+        **_session_lifecycle(session, t),
     }
 
 

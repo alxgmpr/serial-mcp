@@ -6,11 +6,11 @@
   "description": "Communicate with serial devices — microcontrollers, routers, modems, embedded Linux.",
   "author": { "name": "Alex Gompper" },
   "server": {
-    "type": "python",
+    "type": "uv",
     "entry_point": "server/run.py",
     "mcp_config": {
-      "command": "python3",
-      "args": ["${__dirname}/server/run.py"]
+      "command": "uv",
+      "args": ["run", "--frozen", "--directory", "${__dirname}", "server/run.py"]
     }
   },
   "compatibility": {

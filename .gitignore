@@ -1,6 +1,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.DS_Store
+.claude/
+.pytest_cache/
+.ruff_cache/
 .venv/
 *.egg-info/
 dist/
@@ -8,3 +12,4 @@ build/
 .eggs/
 *.mcpb
 .remember/
+/docs/superpowers/specs/
