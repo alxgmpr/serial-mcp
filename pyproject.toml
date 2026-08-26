@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Communications",
 ]
 dependencies = [
-    "mcp>=1.28,<2",
+    "mcp>=1.28,<3",
     "pydantic>=2,<3",
     "pyserial>=3.5",
 ]
