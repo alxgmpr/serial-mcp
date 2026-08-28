@@ -91,6 +91,15 @@ def test_server_instructions_describe_session_cleanup_without_forcing_per_call_c
     assert "Never hold a port open between interactions" not in instructions
 
 
+def test_server_reports_package_version():
+    """MCP initialization should identify serial-mcp, not the SDK version."""
+    from importlib.metadata import version
+
+    from serial_mcp.server import mcp
+
+    assert mcp._mcp_server.version == version("pyserial-mcp")
+
+
 def test_server_import_has_no_warnings():
     result = subprocess.run(
         [sys.executable, "-W", "error", "-c", "import serial_mcp.server"],

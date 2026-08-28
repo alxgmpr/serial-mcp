@@ -7,6 +7,7 @@ import signal
 import subprocess
 import time
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from typing import Literal
 
 import serial
@@ -99,6 +100,7 @@ mcp = FastMCP(
     ),
     lifespan=_lifespan,
 )
+mcp._mcp_server.version = version("pyserial-mcp")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

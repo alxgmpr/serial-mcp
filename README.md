@@ -13,7 +13,9 @@ between tool calls.
 ## Install
 
 The PyPI package is named `pyserial-mcp`; the command it installs is
-`serial-mcp`.
+`serial-mcp`. Python 3.10 or newer is required.
+
+For a persistent installation with explicit upgrades:
 
 ```sh
 uv tool install pyserial-mcp
@@ -25,14 +27,28 @@ Or with pip:
 pip install pyserial-mcp
 ```
 
-Python 3.10 or newer is required.
+Upgrade an existing uv installation with `uv tool upgrade pyserial-mcp`.
 
 ## Connect it to your MCP client
+
+For Codex (the desktop app, CLI, and IDE extension share this configuration):
+
+```sh
+codex mcp add serial-mcp -- serial-mcp
+```
 
 For Claude Code:
 
 ```sh
-claude mcp add serial-mcp -- serial-mcp
+claude mcp add --scope user serial-mcp -- serial-mcp
+```
+
+The quickest setup skips the separate installation and lets `uvx` download and
+run the package. Use the command for your client:
+
+```sh
+codex mcp add serial-mcp -- uvx pyserial-mcp
+claude mcp add --scope user serial-mcp -- uvx pyserial-mcp
 ```
 
 For clients that use an MCP JSON configuration:
@@ -41,14 +57,12 @@ For clients that use an MCP JSON configuration:
 {
   "mcpServers": {
     "serial": {
-      "command": "serial-mcp"
+      "command": "uvx",
+      "args": ["pyserial-mcp"]
     }
   }
 }
 ```
-
-To run without installing, use `"command": "uvx"` and
-`"args": ["pyserial-mcp"]` instead.
 
 ## What it can do
 
