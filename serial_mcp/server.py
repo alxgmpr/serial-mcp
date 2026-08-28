@@ -172,6 +172,17 @@ def _limit_hex_result(result: dict, max_output_bytes: int) -> dict:
     return result
 
 
+def _finalize_text_result(result: dict, session: SerialSession, max_output_bytes: int, encoding: str) -> dict:
+    """Normalize data/matched fields, apply the output limit, and stamp session_id."""
+    if "data" in result:
+        result["data"] = _normalize_output(result["data"])
+    if "matched" in result and result["matched"] is not None:
+        result["matched"] = _normalize_output(result["matched"])
+    _limit_text_result(result, max_output_bytes, encoding)
+    result["session_id"] = session.port
+    return result
+
+
 def _session_lifecycle(session: SerialSession, inactivity_timeout: float) -> dict:
     """Return cleanup requirements and the session's exact inactivity deadline."""
     last_activity_at = session.last_activity
@@ -717,13 +728,7 @@ async def serial_command(
     result = await asyncio.to_thread(
         session.command, raw, expect=expect, timeout=timeout, encoding=encoding, on_match_send=on_match_send
     )
-    if "data" in result:
-        result["data"] = _normalize_output(result["data"])
-    if "matched" in result and result["matched"] is not None:
-        result["matched"] = _normalize_output(result["matched"])
-    _limit_text_result(result, max_output_bytes, encoding)
-    result["session_id"] = session.port
-    return result
+    return _finalize_text_result(result, session, max_output_bytes, encoding)
 
 
 @mcp.tool(
@@ -776,13 +781,7 @@ async def serial_wait_for(
     result = await asyncio.to_thread(
         session.wait_for, pattern=pattern, timeout=timeout, encoding=encoding, on_match_send=on_match_send
     )
-    if "data" in result:
-        result["data"] = _normalize_output(result["data"])
-    if "matched" in result and result["matched"] is not None:
-        result["matched"] = _normalize_output(result["matched"])
-    _limit_text_result(result, max_output_bytes, encoding)
-    result["session_id"] = session.port
-    return result
+    return _finalize_text_result(result, session, max_output_bytes, encoding)
 
 
 # ── Text read/write ──────────────────────────────────────────────────
@@ -853,11 +852,7 @@ async def serial_read(
     """
     session = _resolve_session(session_id)
     result = await asyncio.to_thread(session.read_buffer, timeout=timeout, encoding=encoding)
-    if "data" in result:
-        result["data"] = _normalize_output(result["data"])
-    _limit_text_result(result, max_output_bytes, encoding)
-    result["session_id"] = session.port
-    return result
+    return _finalize_text_result(result, session, max_output_bytes, encoding)
 
 
 @mcp.tool(
@@ -887,10 +882,7 @@ async def serial_read_since(
     """
     session = _resolve_session(session_id)
     result = session.read_since(since=since, encoding=encoding)
-    if "data" in result:
-        result["data"] = _normalize_output(result["data"])
-    _limit_text_result(result, max_output_bytes, encoding)
-    result["session_id"] = session.port
+    _finalize_text_result(result, session, max_output_bytes, encoding)
     result["connected_at"] = int(session.connected_at)
     if result["time_range"] is not None:
         result["time_range"] = {name: int(value) for name, value in result["time_range"].items()}

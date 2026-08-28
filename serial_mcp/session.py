@@ -4,6 +4,19 @@ import time
 
 import serial
 
+_PARITY_MAP = {
+    "none": serial.PARITY_NONE,
+    "even": serial.PARITY_EVEN,
+    "odd": serial.PARITY_ODD,
+    "mark": serial.PARITY_MARK,
+    "space": serial.PARITY_SPACE,
+}
+_STOPBITS_MAP = {
+    1: serial.STOPBITS_ONE,
+    1.5: serial.STOPBITS_ONE_POINT_FIVE,
+    2: serial.STOPBITS_TWO,
+}
+
 
 class SerialSession:
     """Manages a single serial port connection with a background reader thread."""
@@ -18,25 +31,12 @@ class SerialSession:
         timeout: float,
         max_history_bytes: int = 10_000_000,
     ):
-        parity_map = {
-            "none": serial.PARITY_NONE,
-            "even": serial.PARITY_EVEN,
-            "odd": serial.PARITY_ODD,
-            "mark": serial.PARITY_MARK,
-            "space": serial.PARITY_SPACE,
-        }
-        stopbits_map = {
-            1: serial.STOPBITS_ONE,
-            1.5: serial.STOPBITS_ONE_POINT_FIVE,
-            2: serial.STOPBITS_TWO,
-        }
-
         self._serial = serial.Serial(
             port=port,
             baudrate=baud_rate,
             bytesize=data_bits,
-            stopbits=stopbits_map[stop_bits],
-            parity=parity_map[parity],
+            stopbits=_STOPBITS_MAP[stop_bits],
+            parity=_PARITY_MAP[parity],
             timeout=timeout,
         )
 
@@ -382,19 +382,6 @@ class SerialSession:
 
         Supported kwargs: baud_rate, data_bits, stop_bits, parity.
         """
-        parity_map = {
-            "none": serial.PARITY_NONE,
-            "even": serial.PARITY_EVEN,
-            "odd": serial.PARITY_ODD,
-            "mark": serial.PARITY_MARK,
-            "space": serial.PARITY_SPACE,
-        }
-        stopbits_map = {
-            1: serial.STOPBITS_ONE,
-            1.5: serial.STOPBITS_ONE_POINT_FIVE,
-            2: serial.STOPBITS_TWO,
-        }
-
         if "baud_rate" in kwargs:
             self._serial.baudrate = kwargs["baud_rate"]
             self.baud_rate = kwargs["baud_rate"]
@@ -402,10 +389,10 @@ class SerialSession:
             self._serial.bytesize = kwargs["data_bits"]
             self.data_bits = kwargs["data_bits"]
         if "stop_bits" in kwargs:
-            self._serial.stopbits = stopbits_map[kwargs["stop_bits"]]
+            self._serial.stopbits = _STOPBITS_MAP[kwargs["stop_bits"]]
             self.stop_bits = kwargs["stop_bits"]
         if "parity" in kwargs:
-            self._serial.parity = parity_map[kwargs["parity"]]
+            self._serial.parity = _PARITY_MAP[kwargs["parity"]]
             self.parity = kwargs["parity"]
 
     # ── Logging ─────────────────────────────────────────────────────
