@@ -6,7 +6,8 @@ embedded Linux systems, and anything else with a UART.
 `serial-mcp` is an [MCP](https://modelcontextprotocol.io/) server built for real
 device work: interactive shells, bootloader prompts, binary protocols, logging,
 and file transfers. It continuously buffers incoming data so output is not lost
-between tool calls.
+between tool calls. Serial I/O is handled by
+[serialx](https://github.com/puddly/serialx).
 
 ![Claude using serial-mcp to inspect a connected device](https://github.com/user-attachments/assets/17e948ae-4888-4748-8694-77c1e257e329)
 
@@ -67,6 +68,8 @@ For clients that use an MCP JSON configuration:
 ## What it can do
 
 - Discover serial ports and USB metadata, then detect an unknown baud rate.
+- Open local devices or ports exposed over the network: `socket://host:port`
+  (ser2net, socat) and `rfc2217://host:port`.
 - Run a single command with automatic open/close, or keep a session open for an
   interactive shell.
 - Read and write text, raw bytes, and hex data without losing output between
