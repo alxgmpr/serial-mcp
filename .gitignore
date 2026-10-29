@@ -13,3 +13,5 @@ build/
 *.mcpb
 .remember/
 /docs/superpowers/specs/
+AGENTS.md
+CLAUDE.md

@@ -1,3 +1,4 @@
+import errno
 import json
 import subprocess
 import sys
@@ -439,13 +440,11 @@ def test_resolve_session_auto_closed_any():
 @pytest.mark.asyncio
 async def test_serial_open_port_busy(monkeypatch):
     """Should raise clear error when port is busy."""
-    import serial
-
     from serial_mcp.server import serial_open
 
     monkeypatch.setattr(
         "serial_mcp.server.SerialSession",
-        lambda **kw: (_ for _ in ()).throw(serial.SerialException("could not open port: [Errno 16] Resource busy")),
+        lambda **kw: (_ for _ in ()).throw(OSError(errno.EBUSY, "Serial port is already locked by another process")),
     )
     monkeypatch.setattr("serial_mcp.server._get_process_holding_port", lambda p: None)
 
@@ -460,13 +459,11 @@ async def test_serial_open_port_busy(monkeypatch):
 @pytest.mark.asyncio
 async def test_serial_open_port_busy_with_pid(monkeypatch):
     """Should include PID and command when process is identified."""
-    import serial
-
     from serial_mcp.server import serial_open
 
     monkeypatch.setattr(
         "serial_mcp.server.SerialSession",
-        lambda **kw: (_ for _ in ()).throw(serial.SerialException("could not open port: Permission denied")),
+        lambda **kw: (_ for _ in ()).throw(PermissionError(errno.EACCES, "Permission denied")),
     )
     monkeypatch.setattr(
         "serial_mcp.server._get_process_holding_port",
@@ -484,13 +481,11 @@ async def test_serial_open_port_busy_with_pid(monkeypatch):
 @pytest.mark.asyncio
 async def test_serial_open_generic_error(monkeypatch):
     """Non-busy serial errors should get a helpful message."""
-    import serial
-
     from serial_mcp.server import serial_open
 
     monkeypatch.setattr(
         "serial_mcp.server.SerialSession",
-        lambda **kw: (_ for _ in ()).throw(serial.SerialException("port not found")),
+        lambda **kw: (_ for _ in ()).throw(FileNotFoundError(errno.ENOENT, "port not found")),
     )
 
     class FakeCtx:
@@ -507,8 +502,11 @@ async def test_serial_open_uses_elicitation_schema_for_port_choice(mock_serial, 
     from serial_mcp.server import serial_open
 
     monkeypatch.setattr(
-        "serial_mcp.server.list_ports.comports",
-        lambda: [SimpleNamespace(device="/dev/ttyA"), SimpleNamespace(device="/dev/ttyB")],
+        "serialx.list_serial_ports",
+        lambda: [
+            SimpleNamespace(device="/dev/ttyA", resolved_device="/dev/ttyA"),
+            SimpleNamespace(device="/dev/serial/by-id/b", resolved_device="/dev/ttyB"),
+        ],
     )
 
     class FakeCtx:

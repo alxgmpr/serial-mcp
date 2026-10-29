@@ -438,3 +438,78 @@ def test_activity_tracking_data_receipt(mock_serial):
         assert session.last_activity > initial
     finally:
         session.close()
+
+
+def _open_session():
+    return SerialSession(port="/dev/ttyTEST", baud_rate=115200, data_bits=8, stop_bits=1, parity="none", timeout=1.0)
+
+
+def test_signals_map_modem_pins(mock_serial):
+    session = _open_session()
+    try:
+        result = session.set_signals(dtr=False)
+        assert result == {"dtr": False, "rts": True, "cts": None, "dsr": None, "ri": None, "cd": None}
+
+        # The reader holds the port lock for each poll; control calls must not starve behind it.
+        start = time.monotonic()
+        for _ in range(20):
+            session.set_signals(rts=False)
+        assert time.monotonic() - start < 2.0
+    finally:
+        session.close()
+
+
+def test_change_settings_restores_pins(mock_serial):
+    session = _open_session()
+    try:
+        session.set_signals(dtr=False, rts=False)
+        session.change_settings(baud_rate=9600, parity="even")
+        assert mock_serial.baudrate == 9600
+        assert session.baud_rate == 9600 and session.parity == "even"
+        assert session.get_signals()["dtr"] is False
+        assert session.get_signals()["rts"] is False
+    finally:
+        session.close()
+
+
+def test_change_settings_rolls_back_on_rejection(mock_serial):
+    import serialx
+
+    session = _open_session()
+    try:
+        mock_serial.reconfigure_error = serialx.UnsupportedSetting("mark parity")
+        try:
+            session.change_settings(parity="mark")
+            raise AssertionError("expected UnsupportedSetting")
+        except serialx.UnsupportedSetting:
+            pass
+        assert session.parity == "none"
+        assert mock_serial.parity == serialx.Parity.NONE
+    finally:
+        session.close()
+
+
+def test_raw_read_returns_partial_data_on_timeout(mock_serial):
+    session = _open_session()
+    try:
+        session.pause_reader()
+        mock_serial.inject_data(b"abc")
+        assert session.raw_read(10, timeout=0.1) == b"abc"
+    finally:
+        session.close()
+
+
+def test_reader_marks_disconnect_on_oserror(mock_serial):
+    import errno
+
+    def broken(b, *, timeout=None):
+        raise OSError(errno.EIO, "device disconnected or in use by another process")
+
+    session = _open_session()
+    try:
+        mock_serial.readinto = broken
+        time.sleep(0.2)
+        assert session.is_healthy is False
+        assert "disconnected" in session.health_status["reason"]
+    finally:
+        session.close()
