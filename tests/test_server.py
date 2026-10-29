@@ -86,7 +86,7 @@ def test_server_instructions_describe_session_cleanup_without_forcing_per_call_c
     """Global guidance should require cleanup without breaking multi-step sessions."""
     from serial_mcp.server import mcp
 
-    instructions = mcp._mcp_server.instructions
+    instructions = mcp._lowlevel_server.instructions
     assert "Do not report completion until serial_close succeeds" in instructions
     assert "serial_execute() opens and closes its own session" in instructions
     assert "Never hold a port open between interactions" not in instructions
@@ -98,7 +98,7 @@ def test_server_reports_package_version():
 
     from serial_mcp.server import mcp
 
-    assert mcp._mcp_server.version == version("pyserial-mcp")
+    assert mcp._lowlevel_server.version == version("pyserial-mcp")
 
 
 def test_server_import_has_no_warnings():
@@ -148,11 +148,7 @@ async def test_serial_open_returns_cleanup_metadata(mock_serial):
     """Opening a session should clearly identify the required cleanup action."""
     from serial_mcp.server import serial_open
 
-    class FakeCtx:
-        async def elicit(self, *args, **kwargs):
-            raise NotImplementedError
-
-    result = await serial_open(FakeCtx(), port="/dev/ttyTEST", inactivity_timeout=900)
+    result = await serial_open(port="/dev/ttyTEST", inactivity_timeout=900)
     try:
         assert result["cleanup_required"] is True
         assert result["cleanup_tool"] == "serial_close"
@@ -239,10 +235,6 @@ async def test_serial_execute_runs_command_and_closes_session(mock_serial):
     serial_execute = getattr(server, "serial_execute", None)
     assert serial_execute is not None
 
-    class FakeCtx:
-        async def elicit(self, *args, **kwargs):
-            raise NotImplementedError
-
     def delayed_response():
         time.sleep(0.05)
         mock_serial.inject_data(b"OK\r\n")
@@ -250,7 +242,6 @@ async def test_serial_execute_runs_command_and_closes_session(mock_serial):
     response_thread = threading.Thread(target=delayed_response)
     response_thread.start()
     result = await serial_execute(
-        FakeCtx(),
         data="AT",
         port="/dev/ttyTEST",
         baud_rate=9600,
@@ -277,13 +268,8 @@ async def test_serial_execute_closes_session_when_command_fails(mock_serial):
     serial_execute = getattr(server, "serial_execute", None)
     assert serial_execute is not None
 
-    class FakeCtx:
-        async def elicit(self, *args, **kwargs):
-            raise NotImplementedError
-
     with pytest.raises(LookupError):
         await serial_execute(
-            FakeCtx(),
             data="AT",
             port="/dev/ttyTEST",
             encoding="not-an-encoding",
@@ -448,12 +434,8 @@ async def test_serial_open_port_busy(monkeypatch):
     )
     monkeypatch.setattr("serial_mcp.server._get_process_holding_port", lambda p: None)
 
-    class FakeCtx:
-        async def elicit(self, *a, **kw):
-            raise NotImplementedError
-
     with pytest.raises(RuntimeError, match="in use by another process"):
-        await serial_open(FakeCtx(), port="/dev/ttyBUSY")
+        await serial_open(port="/dev/ttyBUSY")
 
 
 @pytest.mark.asyncio
@@ -470,12 +452,8 @@ async def test_serial_open_port_busy_with_pid(monkeypatch):
         lambda p: {"pid": 1234, "user": "root", "command": "minicom"},
     )
 
-    class FakeCtx:
-        async def elicit(self, *a, **kw):
-            raise NotImplementedError
-
     with pytest.raises(RuntimeError, match="PID 1234.*minicom"):
-        await serial_open(FakeCtx(), port="/dev/ttyBUSY")
+        await serial_open(port="/dev/ttyBUSY")
 
 
 @pytest.mark.asyncio
@@ -488,66 +466,102 @@ async def test_serial_open_generic_error(monkeypatch):
         lambda **kw: (_ for _ in ()).throw(FileNotFoundError(errno.ENOENT, "port not found")),
     )
 
-    class FakeCtx:
-        async def elicit(self, *a, **kw):
-            raise NotImplementedError
-
     with pytest.raises(RuntimeError, match="Could not open port.*port not found"):
-        await serial_open(FakeCtx(), port="/dev/ttyNONE")
+        await serial_open(port="/dev/ttyNONE")
 
 
-@pytest.mark.asyncio
-async def test_serial_open_uses_elicitation_schema_for_port_choice(mock_serial, monkeypatch):
+_TWO_PORTS = [
+    SimpleNamespace(device="/dev/ttyA", resolved_device="/dev/ttyA"),
+    SimpleNamespace(device="/dev/serial/by-id/b", resolved_device="/dev/ttyB"),
+]
+
+
+def _answer(action, selection=None, seen=None):
+    """Client elicitation callback that records the prompt and replies with `selection`."""
+    from mcp_types import ElicitResult
+
+    async def callback(context, params):
+        if seen is not None:
+            seen.append(params)
+        return ElicitResult(action=action, content={"selection": selection} if selection else None)
+
+    return callback
+
+
+async def _call(mode, name, arguments, elicitation_callback=None):
+    from mcp.client import Client
+
+    from serial_mcp.server import mcp
+
+    async with Client(mcp, mode=mode, elicitation_callback=elicitation_callback) as client:
+        return await client.call_tool(name, arguments)
+
+
+def _data(result):
+    return json.loads(result.content[0].text)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_serial_open_elicits_port_choice(mock_serial, monkeypatch, mode):
     """Should offer multiple detected ports through a schema-backed elicitation."""
-    from serial_mcp.server import serial_open
+    monkeypatch.setattr("serialx.list_serial_ports", lambda: _TWO_PORTS)
+    seen = []
 
-    monkeypatch.setattr(
-        "serialx.list_serial_ports",
-        lambda: [
-            SimpleNamespace(device="/dev/ttyA", resolved_device="/dev/ttyA"),
-            SimpleNamespace(device="/dev/serial/by-id/b", resolved_device="/dev/ttyB"),
-        ],
-    )
-
-    class FakeCtx:
-        async def elicit(self, message, schema):
-            assert "Multiple serial ports" in message
-            return SimpleNamespace(action="accept", data=schema(selection="/dev/ttyB"))
-
-    result = await serial_open(FakeCtx())
+    result = await _call(mode, "serial_open", {}, _answer("accept", "/dev/ttyB", seen))
     try:
-        assert result["session_id"] == "/dev/ttyB"
+        assert not result.is_error, result.content
+        assert _data(result)["session_id"] == "/dev/ttyB"
+        assert "Multiple serial ports" in seen[0].message
+        assert seen[0].requested_schema["properties"]["selection"]["enum"] == ["/dev/ttyA", "/dev/ttyB"]
     finally:
         if session := _sessions.get("/dev/ttyB"):
             session.close()
 
 
-@pytest.mark.asyncio
-async def test_serial_detect_baud_uses_elicitation_schema(monkeypatch):
-    """Should accept a non-default baud choice from schema-backed elicitation."""
-    from serial_mcp.server import serial_detect_baud
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_serial_open_port_choice_declined(monkeypatch, mode):
+    """Declining the port prompt should return a cancellation, not open a port."""
+    monkeypatch.setattr("serialx.list_serial_ports", lambda: _TWO_PORTS)
+
+    result = await _call(mode, "serial_open", {}, _answer("decline"))
+    assert "cancelled" in _data(result)["error"]
+    assert _sessions == {}
+
+
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_serial_open_without_elicitation_lists_ports(monkeypatch, mode):
+    """Clients without elicitation should get the port list to relay."""
+    monkeypatch.setattr("serialx.list_serial_ports", lambda: _TWO_PORTS)
+
+    result = await _call(mode, "serial_open", {})
+    assert _data(result)["available_ports"] == ["/dev/ttyA", "/dev/ttyB"]
+
+
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+@pytest.mark.parametrize(("callback", "expected"), [(_answer("accept", "9600 (80% readable)"), 9600), (None, 115200)])
+async def test_serial_detect_baud_elicits_confirmation(monkeypatch, mode, callback, expected):
+    """Should accept an elicited baud choice, or the top result without elicitation."""
+    scans = []
+
+    def fake_test(port, baud, probe):
+        scans.append(baud)
+        return {"baud_rate": baud, "readable_ratio": 0.9 if baud == 115200 else 0.8, "bytes_received": 4}
 
     monkeypatch.setattr("serial_mcp.server._COMMON_BAUD_RATES", [115200, 9600])
-    monkeypatch.setattr(
-        "serial_mcp.server._test_baud_rate",
-        lambda port, baud, probe: {
-            "baud_rate": baud,
-            "readable_ratio": 0.9 if baud == 115200 else 0.8,
-            "bytes_received": 4,
-            "sample": "test",
-        },
-    )
+    monkeypatch.setattr("serial_mcp.server._test_baud_rate", fake_test)
 
-    class FakeCtx:
-        async def report_progress(self, progress, total):
-            pass
+    result = await _call(mode, "serial_detect_baud", {"port": "/dev/ttyTEST"}, callback)
+    assert not result.is_error, result.content
+    assert _data(result)["recommended"] == expected
+    assert scans == [115200, 9600]  # the retry round reuses the first scan
 
-        async def elicit(self, message, schema):
-            assert "Baud rate detection complete" in message
-            return SimpleNamespace(action="accept", data=schema(selection="9600 (80% readable)"))
 
-    result = await serial_detect_baud(FakeCtx(), "/dev/ttyTEST")
-    assert result["recommended"] == 9600
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_tool_errors_reach_the_client(mode):
+    """RuntimeError text should reach the model rather than a generic crash message."""
+    result = await _call(mode, "serial_read", {})
+    assert result.is_error
+    assert "No sessions open" in result.content[0].text
 
 
 # ── Triggered response validation tests ──────────────────────────
