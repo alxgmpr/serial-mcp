@@ -449,6 +449,12 @@ def test_signals_map_modem_pins(mock_serial):
     try:
         result = session.set_signals(dtr=False)
         assert result == {"dtr": False, "rts": True, "cts": None, "dsr": None, "ri": None, "cd": None}
+
+        # The reader holds the port lock for each poll; control calls must not starve behind it.
+        start = time.monotonic()
+        for _ in range(20):
+            session.set_signals(rts=False)
+        assert time.monotonic() - start < 2.0
     finally:
         session.close()
 

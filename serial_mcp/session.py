@@ -3,6 +3,7 @@ import sys
 import threading
 import time
 from asyncio import IncompleteReadError
+from contextlib import contextmanager
 
 import serialx
 
@@ -54,6 +55,7 @@ class SerialSession:
         # rfc2217:// answers pin/settings requests on the socket the reader is reading, so those calls must not
         # overlap a readinto(). Writes stay outside it so triggered responses aren't delayed by the reader poll.
         self._io_lock = threading.Lock()
+        self._io_waiters = 0  # control calls waiting for _io_lock; the reader yields while non-zero
         self._data_event = threading.Event()
         self._stop_event = threading.Event()
 
@@ -75,6 +77,18 @@ class SerialSession:
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
 
+    @contextmanager
+    def _control_io(self):
+        """Hold the port against the reader for a pin/settings call."""
+        with self._lock:
+            self._io_waiters += 1
+        try:
+            with self._io_lock:
+                yield
+        finally:
+            with self._lock:
+                self._io_waiters -= 1
+
     # ── Background reader ────────────────────────────────────────────
 
     def _reader_loop(self) -> None:
@@ -82,6 +96,10 @@ class SerialSession:
         buf = bytearray(65536)
         while not self._stop_event.is_set():
             try:
+                # Lock isn't fair: without this the reader re-takes it immediately and starves control calls.
+                if self._io_waiters:
+                    time.sleep(0.001)
+                    continue
                 with self._io_lock:
                     n = self._serial.readinto(buf, timeout=_READER_POLL)
                 if n:
@@ -351,13 +369,13 @@ class SerialSession:
 
     def set_signals(self, dtr: bool | None = None, rts: bool | None = None) -> dict:
         """Set DTR/RTS signals. Returns the state of all control signals."""
-        with self._io_lock:
+        with self._control_io():
             self._serial.set_modem_pins(dtr=dtr, rts=rts)
         return self.get_signals()
 
     def get_signals(self) -> dict:
         """Read the current state of all serial control signals."""
-        with self._io_lock:
+        with self._control_io():
             pins = self._serial.get_modem_pins()
         return {
             "dtr": pins.dtr.to_bool(),
@@ -417,7 +435,7 @@ class SerialSession:
 
         # reconfigure_port re-applies the on-open DTR/RTS state, so put the live pins back afterwards.
         # It also stores settings before applying them, so a rejected update is rolled back explicitly.
-        with self._io_lock:
+        with self._control_io():
             pins = self._serial.get_modem_pins()
             try:
                 self._serial.reconfigure_port(**update)
