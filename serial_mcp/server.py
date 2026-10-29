@@ -12,7 +12,7 @@ from importlib.metadata import version
 from typing import Annotated, Any, Literal
 
 import serialx
-from mcp.server.mcpserver import Context, Elicit, ElicitationResult, MCPServer, Resolve
+from mcp.server.mcpserver import AcceptedElicitation, Context, Elicit, ElicitationResult, MCPServer, Resolve
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from pydantic import create_model
 
@@ -220,6 +220,11 @@ def _elicit_choice(ctx: Context, message: str, choices: list[str]) -> Elicit[Any
         return None
     selection_type = Literal.__getitem__(tuple(choices))
     return Elicit(message, create_model("Choice", selection=(selection_type, ...)))
+
+
+# What a resolver yields when it asked nothing; also the default for direct calls. Not
+# `= None`: Python 3.10 turns that into Optional[...], which hides the Resolve marker.
+_NOT_ASKED = AcceptedElicitation[Any].model_construct(data=None)
 
 
 def _list_port_names() -> list[str]:
@@ -452,7 +457,7 @@ async def serial_open(
     parity: Literal["none", "even", "odd", "mark", "space"] = "none",
     timeout: float = 1.0,
     inactivity_timeout: float = 900,
-    port_choice: Annotated[ElicitationResult[Any], Resolve(_ask_port)] = None,
+    port_choice: Annotated[ElicitationResult[Any], Resolve(_ask_port)] = _NOT_ASKED,
 ) -> dict:
     """Open a serial connection to the specified port.
 
@@ -488,7 +493,7 @@ async def serial_open(
             raise RuntimeError("No serial ports found. Check that a device is connected.")
         if len(ports) == 1:
             port = ports[0]
-        elif port_choice is None or (port_choice.action == "accept" and port_choice.data is None):
+        elif port_choice.action == "accept" and port_choice.data is None:
             # Elicitation not supported — return port list for the LLM to relay
             return {
                 "available_ports": ports,
@@ -647,7 +652,7 @@ async def serial_execute(
     encoding: str = "utf-8",
     append_newline: bool = True,
     max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
-    port_choice: Annotated[ElicitationResult[Any], Resolve(_ask_port)] = None,
+    port_choice: Annotated[ElicitationResult[Any], Resolve(_ask_port)] = _NOT_ASKED,
 ) -> dict:
     """Open 8N1, run one text command, and always close.
 
