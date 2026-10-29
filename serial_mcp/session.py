@@ -1,21 +1,18 @@
 import re
 import threading
 import time
+from asyncio import IncompleteReadError
 
-import serial
+import serialx
 
 _PARITY_MAP = {
-    "none": serial.PARITY_NONE,
-    "even": serial.PARITY_EVEN,
-    "odd": serial.PARITY_ODD,
-    "mark": serial.PARITY_MARK,
-    "space": serial.PARITY_SPACE,
+    "none": serialx.Parity.NONE,
+    "even": serialx.Parity.EVEN,
+    "odd": serialx.Parity.ODD,
+    "mark": serialx.Parity.MARK,
+    "space": serialx.Parity.SPACE,
 }
-_STOPBITS_MAP = {
-    1: serial.STOPBITS_ONE,
-    1.5: serial.STOPBITS_ONE_POINT_FIVE,
-    2: serial.STOPBITS_TWO,
-}
+_READER_POLL = 0.05
 
 
 class SerialSession:
@@ -31,14 +28,16 @@ class SerialSession:
         timeout: float,
         max_history_bytes: int = 10_000_000,
     ):
-        self._serial = serial.Serial(
-            port=port,
+        # Accepts device paths and URLs (socket://, rfc2217://, esphome://).
+        self._serial = serialx.serial_for_url(
+            port,
             baudrate=baud_rate,
-            bytesize=data_bits,
-            stopbits=_STOPBITS_MAP[stop_bits],
+            byte_size=data_bits,
+            stopbits=serialx.StopBits(stop_bits),
             parity=_PARITY_MAP[parity],
-            timeout=timeout,
+            read_timeout=timeout,
         )
+        self._serial.open()
 
         self.port = port
         self.baud_rate = baud_rate
@@ -76,10 +75,12 @@ class SerialSession:
 
     def _reader_loop(self) -> None:
         """Continuously reads from the serial port into the history buffer."""
+        buf = bytearray(65536)
         while not self._stop_event.is_set():
             try:
-                if self._serial.in_waiting > 0:
-                    data = self._serial.read(self._serial.in_waiting)
+                n = self._serial.readinto(buf, timeout=_READER_POLL)
+                if n:
+                    data = bytes(buf[:n])
                     if data:
                         with self._lock:
                             now = time.time()
@@ -101,9 +102,7 @@ class SerialSession:
                                 self._log_bytes += len(data)
                             except Exception:
                                 pass  # Don't let logging errors kill the reader
-                else:
-                    time.sleep(0.01)
-            except serial.SerialException as e:
+            except (OSError, serialx.SerialException) as e:
                 self._disconnected = True
                 self._disconnect_reason = str(e)
                 break
@@ -347,26 +346,40 @@ class SerialSession:
 
     def set_signals(self, dtr: bool | None = None, rts: bool | None = None) -> dict:
         """Set DTR/RTS signals. Returns the state of all control signals."""
-        if dtr is not None:
-            self._serial.dtr = dtr
-        if rts is not None:
-            self._serial.rts = rts
+        self._serial.set_modem_pins(dtr=dtr, rts=rts)
         return self.get_signals()
 
     def get_signals(self) -> dict:
         """Read the current state of all serial control signals."""
+        pins = self._serial.get_modem_pins()
         return {
-            "dtr": self._serial.dtr,
-            "rts": self._serial.rts,
-            "cts": self._serial.cts,
-            "dsr": self._serial.dsr,
-            "ri": self._serial.ri,
-            "cd": self._serial.cd,
+            "dtr": pins.dtr.to_bool(),
+            "rts": pins.rts.to_bool(),
+            "cts": pins.cts.to_bool(),
+            "dsr": pins.dsr.to_bool(),
+            "ri": pins.rng.to_bool(),
+            "cd": pins.car.to_bool(),
         }
 
     def send_break(self, duration: float = 0.25) -> None:
-        """Send a serial break signal for the given duration (seconds)."""
-        self._serial.send_break(duration)
+        """Send a serial break signal for the given duration (seconds).
+
+        serialx has no break API, and tcsendbreak ignores the duration on macOS,
+        so drive TIOCSBRK/TIOCCBRK on the file descriptor directly.
+        """
+        try:
+            import fcntl
+            import termios
+
+            fd = self._serial.fileno()
+        except (ImportError, AttributeError, NotImplementedError) as e:
+            raise RuntimeError(f"Break is not supported on {self.port}") from e
+        # Python's termios lacks the break ioctls on macOS; fall back to the Darwin values.
+        fcntl.ioctl(fd, getattr(termios, "TIOCSBRK", 0x2000747B))
+        try:
+            time.sleep(duration)
+        finally:
+            fcntl.ioctl(fd, getattr(termios, "TIOCCBRK", 0x2000747A))
 
     # ── Session management ───────────────────────────────────────────
 
@@ -382,18 +395,38 @@ class SerialSession:
 
         Supported kwargs: baud_rate, data_bits, stop_bits, parity.
         """
+        update = {}
         if "baud_rate" in kwargs:
-            self._serial.baudrate = kwargs["baud_rate"]
-            self.baud_rate = kwargs["baud_rate"]
+            update["baudrate"] = kwargs["baud_rate"]
         if "data_bits" in kwargs:
-            self._serial.bytesize = kwargs["data_bits"]
-            self.data_bits = kwargs["data_bits"]
+            update["byte_size"] = kwargs["data_bits"]
         if "stop_bits" in kwargs:
-            self._serial.stopbits = _STOPBITS_MAP[kwargs["stop_bits"]]
-            self.stop_bits = kwargs["stop_bits"]
+            update["stopbits"] = serialx.StopBits(kwargs["stop_bits"])
         if "parity" in kwargs:
-            self._serial.parity = _PARITY_MAP[kwargs["parity"]]
-            self.parity = kwargs["parity"]
+            update["parity"] = _PARITY_MAP[kwargs["parity"]]
+        if not update:
+            return
+
+        # reconfigure_port re-applies the on-open DTR/RTS state, so put the live pins back afterwards.
+        # It also stores settings before applying them, so a rejected update is rolled back explicitly.
+        pins = self._serial.get_modem_pins()
+        try:
+            self._serial.reconfigure_port(**update)
+        except Exception:
+            self._serial.reconfigure_port(
+                baudrate=self.baud_rate,
+                byte_size=self.data_bits,
+                stopbits=serialx.StopBits(self.stop_bits),
+                parity=_PARITY_MAP[self.parity],
+            )
+            raise
+        finally:
+            self._serial.set_modem_pins(dtr=pins.dtr, rts=pins.rts)
+
+        self.baud_rate = kwargs.get("baud_rate", self.baud_rate)
+        self.data_bits = kwargs.get("data_bits", self.data_bits)
+        self.stop_bits = kwargs.get("stop_bits", self.stop_bits)
+        self.parity = kwargs.get("parity", self.parity)
 
     # ── Logging ─────────────────────────────────────────────────────
 
@@ -448,9 +481,10 @@ class SerialSession:
 
         Used during XMODEM transfers when the reader thread is paused.
         """
-        self._serial.timeout = timeout
-        data = self._serial.read(size)
-        return data
+        try:
+            return self._serial.readexactly(size, timeout=timeout)
+        except IncompleteReadError as e:
+            return e.partial
 
     def raw_write(self, data: bytes) -> int:
         """Write bytes directly to the serial port."""

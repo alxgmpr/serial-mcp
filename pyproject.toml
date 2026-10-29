@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [
     { name = "Alex Gompper" },
 ]
-keywords = ["mcp", "serial", "uart", "embedded", "iot", "pyserial"]
+keywords = ["mcp", "serial", "uart", "embedded", "iot", "serialx"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -27,9 +27,9 @@ classifiers = [
     "Topic :: Communications",
 ]
 dependencies = [
-    "mcp>=1.28,<2",
+    "mcp>=1.29.1,<2",
     "pydantic>=2,<3",
-    "pyserial>=3.5",
+    "serialx>=1.15.1,<2",
 ]
 
 [project.urls]
@@ -60,3 +60,4 @@ select = ["E", "F", "W", "I"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

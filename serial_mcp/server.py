@@ -10,11 +10,9 @@ from contextlib import asynccontextmanager
 from importlib.metadata import version
 from typing import Literal
 
-import serial
+import serialx
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.server import Settings
 from pydantic import create_model
-from serial.tools import list_ports
 
 from serial_mcp.session import SerialSession
 
@@ -36,10 +34,6 @@ _session_timeouts: dict[str, float] = {}
 _auto_closed_sessions: dict[str, str] = {}
 
 logger = logging.getLogger("serial_mcp")
-
-# MCP 1.29 leaves Settings.lifespan as an unresolved forward reference.
-# Rebuilding is safe to remove once modelcontextprotocol/python-sdk#3294 ships.
-Settings.model_rebuild()
 
 
 def _cleanup_sessions():
@@ -282,16 +276,15 @@ def _resolve_session(session_id: str | None = None) -> SerialSession:
 async def list_serial_ports() -> list[dict]:
     """List all available serial ports on the system.
 
-    Returns device path, description, hardware ID, and USB metadata
+    Returns device path, description, and USB metadata
     (vendor/product IDs, manufacturer, serial number) when available.
     Use this to discover which TTL adapters or serial devices are connected.
     """
     results = []
-    for p in list_ports.comports():
+    for p in serialx.list_serial_ports():
         info: dict = {
             "device": p.device,
             "description": p.description,
-            "hwid": p.hwid,
         }
         # USB metadata — only present for USB-serial adapters
         if p.vid is not None:
@@ -301,7 +294,6 @@ async def list_serial_ports() -> list[dict]:
                 "manufacturer": p.manufacturer,
                 "product": p.product,
                 "serial_number": p.serial_number,
-                "location": p.location,
             }
         results.append(info)
     return results
@@ -444,7 +436,8 @@ async def serial_open(
     - Use serial_detect_baud() first if unsure of the baud rate.
 
     Args:
-        port: Serial port device path (e.g. /dev/ttyUSB0, COM3). Optional — omit to auto-discover.
+        port: Serial port device path (e.g. /dev/ttyUSB0, COM3) or URL (socket://host:port,
+            rfc2217://host:port, esphome://host:6053/?port_name=...). Optional — omit to auto-discover.
         baud_rate: Baud rate for the connection
         data_bits: Number of data bits (5, 6, 7, or 8)
         stop_bits: Number of stop bits (1, 1.5, or 2)
@@ -454,7 +447,7 @@ async def serial_open(
     """
     # If no port specified, try to elicit a choice
     if port is None:
-        ports = [p.device for p in list_ports.comports()]
+        ports = [p.device for p in serialx.list_serial_ports()]
         if not ports:
             raise RuntimeError("No serial ports found. Check that a device is connected.")
         if len(ports) == 1:
@@ -494,7 +487,7 @@ async def serial_open(
             parity=parity,
             timeout=timeout,
         )
-    except (serial.SerialException, PermissionError, OSError) as e:
+    except (serialx.SerialException, OSError) as e:
         err_str = str(e).lower()
         if any(kw in err_str for kw in ("busy", "permission", "access", "locked", "in use")):
             proc = _get_process_holding_port(port)
@@ -567,6 +560,9 @@ async def serial_change_settings(
 
     Useful when a device changes baud rate mid-session (e.g. bootloader
     hands off to OS at a different speed) or during manual baud detection.
+
+    The OS flushes the port's buffers when settings change, so bytes still in
+    flight are dropped. DTR/RTS are restored afterwards but may pulse briefly.
 
     Args:
         session_id: Port name of the session. Optional if only one session is open.
@@ -1065,24 +1061,22 @@ _COMMON_BAUD_RATES = [115200, 9600, 57600, 38400, 19200, 4800, 2400, 1200]
 def _test_baud_rate(port: str, baud: int, probe: bool) -> dict | None:
     """Test a single baud rate. Returns result dict or None on failure."""
     try:
-        s = serial.Serial(port, baud, timeout=0.5)
-        time.sleep(0.1)
+        with serialx.serial_for_url(port, baudrate=baud) as s:
+            time.sleep(0.1)
 
-        # Drain any stale data
-        if s.in_waiting:
-            s.read(s.in_waiting)
+            # Drain any stale data
+            s.reset_read_buffer()
 
-        if probe:
-            s.write(b"\r\n")
-            time.sleep(0.5)
-        else:
-            time.sleep(1.0)
+            if probe:
+                s.write(b"\r\n")
+                time.sleep(0.5)
+            else:
+                time.sleep(1.0)
 
-        data = b""
-        if s.in_waiting:
-            data = s.read(s.in_waiting)
-
-        s.close()
+            data = b""
+            buf = bytearray(4096)
+            while n := s.readinto(buf, timeout=0):
+                data += buf[:n]
 
         if data:
             printable = sum(1 for b in data if 32 <= b <= 126 or b in (10, 13, 9))
@@ -1093,7 +1087,7 @@ def _test_baud_rate(port: str, baud: int, probe: bool) -> dict | None:
                 "bytes_received": len(data),
                 "sample": data.decode("ascii", errors="replace")[:200],
             }
-    except serial.SerialException:
+    except (serialx.SerialException, OSError):
         pass
     return None
 
