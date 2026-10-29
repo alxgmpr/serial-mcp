@@ -503,7 +503,10 @@ async def test_serial_open_uses_elicitation_schema_for_port_choice(mock_serial, 
 
     monkeypatch.setattr(
         "serialx.list_serial_ports",
-        lambda: [SimpleNamespace(device="/dev/ttyA"), SimpleNamespace(device="/dev/ttyB")],
+        lambda: [
+            SimpleNamespace(device="/dev/ttyA", resolved_device="/dev/ttyA"),
+            SimpleNamespace(device="/dev/serial/by-id/b", resolved_device="/dev/ttyB"),
+        ],
     )
 
     class FakeCtx:

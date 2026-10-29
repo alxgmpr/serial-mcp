@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import atexit
+import errno
 import logging
 import os
 import signal
@@ -282,10 +283,13 @@ async def list_serial_ports() -> list[dict]:
     """
     results = []
     for p in serialx.list_serial_ports():
+        # Linux reports /dev/serial/by-id/... as device; keep the kernel path so session ids match what users type.
         info: dict = {
-            "device": p.device,
+            "device": p.resolved_device or p.device,
             "description": p.description,
         }
+        if p.resolved_device and p.resolved_device != p.device:
+            info["by_id"] = p.device
         # USB metadata — only present for USB-serial adapters
         if p.vid is not None:
             info["usb"] = {
@@ -437,7 +441,7 @@ async def serial_open(
 
     Args:
         port: Serial port device path (e.g. /dev/ttyUSB0, COM3) or URL (socket://host:port,
-            rfc2217://host:port, esphome://host:6053/?port_name=...). Optional — omit to auto-discover.
+            rfc2217://host:port). Optional — omit to auto-discover.
         baud_rate: Baud rate for the connection
         data_bits: Number of data bits (5, 6, 7, or 8)
         stop_bits: Number of stop bits (1, 1.5, or 2)
@@ -447,7 +451,7 @@ async def serial_open(
     """
     # If no port specified, try to elicit a choice
     if port is None:
-        ports = [p.device for p in serialx.list_serial_ports()]
+        ports = [p.resolved_device or p.device for p in serialx.list_serial_ports()]
         if not ports:
             raise RuntimeError("No serial ports found. Check that a device is connected.")
         if len(ports) == 1:
@@ -1087,7 +1091,10 @@ def _test_baud_rate(port: str, baud: int, probe: bool) -> dict | None:
                 "bytes_received": len(data),
                 "sample": data.decode("ascii", errors="replace")[:200],
             }
-    except (serialx.SerialException, OSError):
+    except OSError as e:
+        if e.errno in (errno.EBUSY, errno.EACCES):
+            raise RuntimeError(f"Port {port} is in use or not accessible: {e}") from e
+    except serialx.SerialException:
         pass
     return None
 

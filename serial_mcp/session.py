@@ -1,4 +1,5 @@
 import re
+import sys
 import threading
 import time
 from asyncio import IncompleteReadError
@@ -50,6 +51,9 @@ class SerialSession:
         self._history: list[tuple[float, bytes]] = []
         self._read_cursor: int = 0
         self._lock = threading.Lock()
+        # rfc2217:// answers pin/settings requests on the socket the reader is reading, so those calls must not
+        # overlap a readinto(). Writes stay outside it so triggered responses aren't delayed by the reader poll.
+        self._io_lock = threading.Lock()
         self._data_event = threading.Event()
         self._stop_event = threading.Event()
 
@@ -78,7 +82,8 @@ class SerialSession:
         buf = bytearray(65536)
         while not self._stop_event.is_set():
             try:
-                n = self._serial.readinto(buf, timeout=_READER_POLL)
+                with self._io_lock:
+                    n = self._serial.readinto(buf, timeout=_READER_POLL)
                 if n:
                     data = bytes(buf[:n])
                     if data:
@@ -346,12 +351,14 @@ class SerialSession:
 
     def set_signals(self, dtr: bool | None = None, rts: bool | None = None) -> dict:
         """Set DTR/RTS signals. Returns the state of all control signals."""
-        self._serial.set_modem_pins(dtr=dtr, rts=rts)
+        with self._io_lock:
+            self._serial.set_modem_pins(dtr=dtr, rts=rts)
         return self.get_signals()
 
     def get_signals(self) -> dict:
         """Read the current state of all serial control signals."""
-        pins = self._serial.get_modem_pins()
+        with self._io_lock:
+            pins = self._serial.get_modem_pins()
         return {
             "dtr": pins.dtr.to_bool(),
             "rts": pins.rts.to_bool(),
@@ -372,14 +379,15 @@ class SerialSession:
             import termios
 
             fd = self._serial.fileno()
-        except (ImportError, AttributeError, NotImplementedError) as e:
+        except (ImportError, AttributeError, NotImplementedError, OSError) as e:
             raise RuntimeError(f"Break is not supported on {self.port}") from e
-        # Python's termios lacks the break ioctls on macOS; fall back to the Darwin values.
-        fcntl.ioctl(fd, getattr(termios, "TIOCSBRK", 0x2000747B))
+        # Python's termios usually lacks the break ioctls; Linux and BSD/macOS encode them differently.
+        set_brk, clr_brk = (0x5427, 0x5428) if sys.platform.startswith("linux") else (0x2000747B, 0x2000747A)
+        fcntl.ioctl(fd, getattr(termios, "TIOCSBRK", set_brk))
         try:
             time.sleep(duration)
         finally:
-            fcntl.ioctl(fd, getattr(termios, "TIOCCBRK", 0x2000747A))
+            fcntl.ioctl(fd, getattr(termios, "TIOCCBRK", clr_brk))
 
     # ── Session management ───────────────────────────────────────────
 
@@ -409,19 +417,26 @@ class SerialSession:
 
         # reconfigure_port re-applies the on-open DTR/RTS state, so put the live pins back afterwards.
         # It also stores settings before applying them, so a rejected update is rolled back explicitly.
-        pins = self._serial.get_modem_pins()
-        try:
-            self._serial.reconfigure_port(**update)
-        except Exception:
-            self._serial.reconfigure_port(
-                baudrate=self.baud_rate,
-                byte_size=self.data_bits,
-                stopbits=serialx.StopBits(self.stop_bits),
-                parity=_PARITY_MAP[self.parity],
-            )
-            raise
-        finally:
-            self._serial.set_modem_pins(dtr=pins.dtr, rts=pins.rts)
+        with self._io_lock:
+            pins = self._serial.get_modem_pins()
+            try:
+                self._serial.reconfigure_port(**update)
+            except Exception:
+                try:
+                    self._serial.reconfigure_port(
+                        baudrate=self.baud_rate,
+                        byte_size=self.data_bits,
+                        stopbits=serialx.StopBits(self.stop_bits),
+                        parity=_PARITY_MAP[self.parity],
+                    )
+                except Exception:
+                    pass  # surface the original error
+                raise
+            finally:
+                try:
+                    self._serial.set_modem_pins(dtr=pins.dtr, rts=pins.rts)
+                except Exception:
+                    pass
 
         self.baud_rate = kwargs.get("baud_rate", self.baud_rate)
         self.data_bits = kwargs.get("data_bits", self.data_bits)
