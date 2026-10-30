@@ -9,10 +9,11 @@ import subprocess
 import time
 from contextlib import asynccontextmanager
 from importlib.metadata import version
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 import serialx
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import AcceptedElicitation, Context, Elicit, ElicitationResult, MCPServer, Resolve
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from pydantic import create_model
 
 from serial_mcp.session import SerialSession
@@ -84,8 +85,23 @@ async def _lifespan(app):
             pass
 
 
-mcp = FastMCP(
+class _SerialMCPServer(MCPServer):
+    async def call_tool(self, name, arguments, context=None):
+        # mcp 2.x hides the text of non-ToolError exceptions from the client. Port-busy,
+        # bad-argument and device errors are what the model needs to recover, so surface
+        # them the way mcp 1.x did.
+        try:
+            return await super().call_tool(name, arguments, context)
+        except UnexpectedToolError as e:
+            cause = e.__cause__
+            while isinstance(cause, UnexpectedToolError):
+                cause = cause.__cause__
+            raise ToolError(f"{e}: {cause}") from cause
+
+
+mcp = _SerialMCPServer(
     "serial_mcp",
+    version=version("pyserial-mcp"),
     instructions=(
         "Serial ports are exclusive resources. After calling serial_open(), call serial_close() before ending the "
         "task, switching to unrelated work, or abandoning the operation. Do not report completion until "
@@ -95,7 +111,6 @@ mcp = FastMCP(
     ),
     lifespan=_lifespan,
 )
-mcp._mcp_server.version = version("pyserial-mcp")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -192,14 +207,36 @@ def _session_lifecycle(session: SerialSession, inactivity_timeout: float) -> dic
     }
 
 
-async def _elicit_choice(ctx: Context, message: str, choices: list[str]) -> str | None:
-    """Ask the client to select one of a bounded set of string values."""
-    selection_type = Literal.__getitem__(tuple(choices))
-    choice_model = create_model("Choice", selection=(selection_type, ...))
-    result = await ctx.elicit(message, schema=choice_model)
-    if result.action != "accept" or result.data is None:
+def _elicit_choice(ctx: Context, message: str, choices: list[str]) -> Elicit[Any] | None:
+    """Build a resolver request asking the client to pick one of `choices`.
+
+    Returns None when the client did not declare form elicitation (a bare
+    `elicitation: {}` counts); the resolver then yields an accepted outcome with
+    no data and the tool falls back to returning data for the LLM to relay.
+    """
+    caps = ctx.client_capabilities
+    elicitation = caps.elicitation if caps is not None else None
+    if elicitation is None or (elicitation.form is None and elicitation.url is not None):
         return None
-    return result.data.selection
+    selection_type = Literal.__getitem__(tuple(choices))
+    return Elicit(message, create_model("Choice", selection=(selection_type, ...)))
+
+
+# What a resolver yields when it asked nothing; also the default for direct calls. Not
+# `= None`: Python 3.10 turns that into Optional[...], which hides the Resolve marker.
+_NOT_ASKED = AcceptedElicitation[Any].model_construct(data=None)
+
+
+def _list_port_names() -> list[str]:
+    return [p.resolved_device or p.device for p in serialx.list_serial_ports()]
+
+
+def _ask_port(ctx: Context, port: str | None) -> Elicit[Any] | None:
+    """Resolver for serial_open: ask which port to use when several are found."""
+    if port is not None:
+        return None
+    ports = _list_port_names()
+    return _elicit_choice(ctx, "Multiple serial ports found. Select one:", ports) if len(ports) > 1 else None
 
 
 def _get_process_holding_port(port: str) -> dict | None:
@@ -413,7 +450,6 @@ async def serial_force_release(port: str) -> dict:
     }
 )
 async def serial_open(
-    ctx: Context,
     port: str | None = None,
     baud_rate: int = 115200,
     data_bits: Literal[5, 6, 7, 8] = 8,
@@ -421,6 +457,7 @@ async def serial_open(
     parity: Literal["none", "even", "odd", "mark", "space"] = "none",
     timeout: float = 1.0,
     inactivity_timeout: float = 900,
+    port_choice: Annotated[ElicitationResult[Any], Resolve(_ask_port)] = _NOT_ASKED,
 ) -> dict:
     """Open a serial connection to the specified port.
 
@@ -451,26 +488,21 @@ async def serial_open(
     """
     # If no port specified, try to elicit a choice
     if port is None:
-        ports = [p.resolved_device or p.device for p in serialx.list_serial_ports()]
+        ports = _list_port_names()
         if not ports:
             raise RuntimeError("No serial ports found. Check that a device is connected.")
         if len(ports) == 1:
             port = ports[0]
+        elif port_choice.action == "accept" and port_choice.data is None:
+            # Elicitation not supported — return port list for the LLM to relay
+            return {
+                "available_ports": ports,
+                "message": "Multiple ports found. Please call serial_open() again with one of the listed ports.",
+            }
+        elif port_choice.action != "accept":
+            return {"error": "Port selection cancelled. Call serial_open(port=...) with a specific port."}
         else:
-            try:
-                port = await _elicit_choice(
-                    ctx,
-                    "Multiple serial ports found. Select one:",
-                    ports,
-                )
-                if port is None:
-                    return {"error": "Port selection cancelled. Call serial_open(port=...) with a specific port."}
-            except Exception:
-                # Elicitation not supported — return port list for the LLM to relay
-                return {
-                    "available_ports": ports,
-                    "message": "Multiple ports found. Please call serial_open() again with one of the listed ports.",
-                }
+            port = port_choice.data.selection
 
     if port in _sessions:
         raise RuntimeError(
@@ -612,7 +644,6 @@ async def serial_change_settings(
     }
 )
 async def serial_execute(
-    ctx: Context,
     data: str,
     port: str | None = None,
     baud_rate: int = 115200,
@@ -621,6 +652,7 @@ async def serial_execute(
     encoding: str = "utf-8",
     append_newline: bool = True,
     max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+    port_choice: Annotated[ElicitationResult[Any], Resolve(_ask_port)] = _NOT_ASKED,
 ) -> dict:
     """Open 8N1, run one text command, and always close.
 
@@ -636,7 +668,7 @@ async def serial_execute(
         encoding: Text encoding
         append_newline: Whether to append CRLF
     """
-    opened = await serial_open(ctx, port=port, baud_rate=baud_rate)
+    opened = await serial_open(port=port, baud_rate=baud_rate, port_choice=port_choice)
     session_id = opened.get("session_id")
     if session_id is None:
         return opened
@@ -1099,6 +1131,38 @@ def _test_baud_rate(port: str, baud: int, probe: bool) -> dict | None:
     return None
 
 
+_baud_scans: dict[str, list[dict]] = {}
+
+
+async def _scan_baud(ctx: Context, port: str, probe: bool) -> list[dict]:
+    """Resolver for serial_detect_baud: try each common rate, best match first."""
+    if port in _sessions:
+        raise RuntimeError(f"Port {port} has an active session. Close it first with serial_close().")
+    # Resolvers re-run on every 2026-07-28 input round. Reuse the first round's scan on
+    # the retry so the confirmation question, and the answer pinned to it, stay identical.
+    if ctx.input_responses and port in _baud_scans:
+        return _baud_scans[port]
+
+    results = []
+    for i, baud in enumerate(_COMMON_BAUD_RATES):
+        await ctx.report_progress(i, len(_COMMON_BAUD_RATES))
+        result = await asyncio.to_thread(_test_baud_rate, port, baud, probe)
+        if result:
+            results.append(result)
+
+    results.sort(key=lambda x: x["readable_ratio"], reverse=True)
+    _baud_scans[port] = results
+    return results
+
+
+def _ask_baud(ctx: Context, port: str, results: Annotated[list[dict], Resolve(_scan_baud)]) -> Elicit[Any] | None:
+    """Resolver for serial_detect_baud: ask the user to confirm one of the top rates."""
+    if not results:
+        return None
+    choices = [f"{r['baud_rate']} ({int(r['readable_ratio'] * 100)}% readable)" for r in results[:3]]
+    return _elicit_choice(ctx, f"Baud rate detection complete for {port}. Confirm rate:", choices)
+
+
 @mcp.tool(
     annotations={
         "readOnlyHint": False,
@@ -1108,8 +1172,9 @@ def _test_baud_rate(port: str, baud: int, probe: bool) -> dict | None:
     }
 )
 async def serial_detect_baud(
-    ctx: Context,
     port: str,
+    results: Annotated[list[dict], Resolve(_scan_baud)],
+    confirmation: Annotated[ElicitationResult[Any], Resolve(_ask_baud)],
     probe: bool = True,
 ) -> dict:
     """Auto-detect the baud rate on a serial port by trying common rates and
@@ -1126,18 +1191,7 @@ async def serial_detect_baud(
         port: Serial port device path (e.g. /dev/ttyUSB0, COM3)
         probe: Whether to send \\r\\n to prompt a response (default True)
     """
-    if port in _sessions:
-        raise RuntimeError(f"Port {port} has an active session. Close it first with serial_close().")
-
-    results = []
-    for i, baud in enumerate(_COMMON_BAUD_RATES):
-        await ctx.report_progress(i, len(_COMMON_BAUD_RATES))
-        result = await asyncio.to_thread(_test_baud_rate, port, baud, probe)
-        if result:
-            results.append(result)
-
-    results.sort(key=lambda x: x["readable_ratio"], reverse=True)
-
+    _baud_scans.pop(port, None)
     if not results:
         return {
             "port": port,
@@ -1146,23 +1200,11 @@ async def serial_detect_baud(
             "message": ("No data received at any baud rate. Check wiring and that the device is powered on."),
         }
 
-    # Try to elicit baud rate confirmation
-    top_results = results[:3]
-    choices = [f"{r['baud_rate']} ({int(r['readable_ratio'] * 100)}% readable)" for r in top_results]
-
     selected_baud = results[0]["baud_rate"]
-    try:
-        selected_choice = await _elicit_choice(
-            ctx,
-            f"Baud rate detection complete for {port}. Confirm rate:",
-            choices,
-        )
-        if selected_choice is not None:
-            # Parse baud rate from the selection string (e.g., "115200 (98% readable)")
-            selected_baud = int(selected_choice.split(" ")[0])
-    except Exception:
-        # Elicitation not supported — use top result
-        pass
+    # Declined, cancelled, or elicitation not supported — use top result
+    if confirmation.action == "accept" and confirmation.data is not None:
+        # Parse baud rate from the selection string (e.g., "115200 (98% readable)")
+        selected_baud = int(confirmation.data.selection.split(" ")[0])
 
     return {
         "port": port,

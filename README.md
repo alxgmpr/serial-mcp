@@ -7,7 +7,12 @@ embedded Linux systems, and anything else with a UART.
 device work: interactive shells, bootloader prompts, binary protocols, logging,
 and file transfers. It continuously buffers incoming data so output is not lost
 between tool calls. Serial I/O is handled by
-[serialx](https://github.com/puddly/serialx).
+[serialx](https://github.com/puddly/serialx), and the server is built on the
+[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) 2.x.
+
+Clients that support elicitation are prompted to pick a port (when several are
+connected) and to confirm a detected baud rate, on both the 2025-11-25 and
+2026-07-28 protocols. Other clients get the same information back as tool output.
 
 ![Claude using serial-mcp to inspect a connected device](https://github.com/user-attachments/assets/17e948ae-4888-4748-8694-77c1e257e329)
 
